@@ -1,9 +1,9 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MarketplaceRegistry } from "../marketplaces.js";
-import { PRODUCT_CATALOGUE, REPORT_CATALOGUE } from "../knowledge.js";
+import { BLOCKED_REPORTS, PRODUCT_CATALOGUE, REPORT_CATALOGUE, isBlockedReport } from "../knowledge.js";
 import { HEAVY_TIMEOUT_MS, reportToRecords } from "../reports.js";
-import { accountId, registerReadTools, resellerContext } from "./helpers.js";
+import { accountId, registerCompositeTool, registerReadTools, resellerContext } from "./helpers.js";
 
 const year = z.number().int().min(2000).max(2100).describe("Four-digit year, e.g. 2026.");
 const month = z.number().int().min(1).max(12).describe("Month number, 1-12.");
@@ -27,27 +27,6 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
       operation: "GetReports",
       title: "List reports",
       description: "List the reports available to the user, with the parameters and columns each one accepts.",
-    },
-    {
-      name: "execute_report",
-      operation: "ExecuteReport",
-      title: "Run a report",
-      description:
-        "Run a report and return its rows as {column: value} records. Call get_reports to confirm a report's parameters " +
-        "and columns. Prefer the review_* tools for routine checks; they run these reports and apply the business rules. " +
-        REPORT_CATALOGUE,
-      timeoutMs: HEAVY_TIMEOUT_MS,
-      transform: (data) => {
-        const records = reportToRecords(data);
-        return records ? { rowCount: records.length, rows: records } : data;
-      },
-      input: {
-        reportName: z.string().describe("Report name, as returned by get_reports."),
-        parameters: z
-          .record(z.string(), z.unknown())
-          .describe('Report parameters, e.g. {"startdate": "2026-01-01", "enddate": "2026-01-31"}.'),
-        columns: z.array(z.string()).optional().describe("Optional subset of columns to return."),
-      },
     },
     {
       name: "get_all_product_accounts_with_fields_report",
@@ -85,4 +64,30 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
       input: { accountId: accountId() },
     },
   ]);
+
+  // A composite tool rather than a plain read tool, so blocked reports are refused before anything reaches the API.
+  registerCompositeTool(server, registry, {
+    name: "execute_report",
+    title: "Run a report",
+    description:
+      "Run a report and return its rows as {column: value} records. Call get_reports to confirm a report's parameters " +
+      "and columns. Prefer the review_* tools for routine checks; they run these reports and apply the business rules. " +
+      `These reports are disabled because they overload the platform: ${BLOCKED_REPORTS.join(", ")}. ` +
+      REPORT_CATALOGUE,
+    input: {
+      reportName: z.string().describe("Report name, as returned by get_reports."),
+      parameters: z
+        .record(z.string(), z.unknown())
+        .describe('Report parameters, e.g. {"startdate": "2026-01-01", "enddate": "2026-01-31"}.'),
+      columns: z.array(z.string()).optional().describe("Optional subset of columns to return."),
+    },
+    run: async ({ reportName, parameters, columns }, client) => {
+      if (isBlockedReport(reportName)) {
+        throw new Error(`The report "${reportName}" is disabled in this server because it overloads the platform.`);
+      }
+      const data = await client.call("ExecuteReport", { reportName, parameters, ...(columns ? { columns } : {}) }, HEAVY_TIMEOUT_MS);
+      const records = reportToRecords(data);
+      return records ? { rowCount: records.length, rows: records } : data;
+    },
+  });
 }

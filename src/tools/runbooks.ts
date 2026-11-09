@@ -90,14 +90,24 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     title: "Review waiting and failed provisioning",
     description:
       "Daily ops check (runbook AllMarketplacesWaitingAndFailedProvisionings). Runs the 'Waiting provisioning requests' and " +
-      "'Failed provisioning requests' reports and classifies waiting requests by age: 'stuck_renewal' = RENEW action still " +
-      "WAITING after 1+ day; 'overdue' = any request waiting 2+ days; 'recent' otherwise. Failed requests include the vendor error.",
+      "'Failed provisioning details' reports and classifies waiting requests by age: 'stuck_renewal' = RENEW action still " +
+      "WAITING after 1+ day; 'overdue' = any request waiting 2+ days; 'recent' otherwise. Failed requests list the target " +
+      "account, product, action, CSP and the vendor error. If one report fails, the other half is still returned.",
     run: async (_args, client) => {
-      const [waiting, failed] = await Promise.all([
+      // The runbook's 'Failed provisioning requests' report isn't granted to the MCP users; 'Failed provisioning
+      // details' is (columns Target, ProductName, Action, CSP, ErrorDetails). The halves run independently.
+      const [waitingResult, failedResult] = await Promise.allSettled([
         runReport(client, "Waiting provisioning requests"),
-        runReport(client, "Failed provisioning requests"),
+        runReport(client, "Failed provisioning details"),
       ]);
-      const waitingItems = waiting.map((r) => {
+      const errors: string[] = [];
+      if (waitingResult.status === "rejected") errors.push(`waiting requests: ${String(waitingResult.reason?.message ?? waitingResult.reason)}`);
+      if (failedResult.status === "rejected") errors.push(`failed requests: ${String(failedResult.reason?.message ?? failedResult.reason)}`);
+      if (errors.length === 2) throw new Error(errors.join(" | "));
+      const waiting = waitingResult.status === "fulfilled" ? waitingResult.value : undefined;
+      const failed = failedResult.status === "fulfilled" ? failedResult.value : undefined;
+
+      const waitingItems = (waiting ?? []).map((r) => {
         const created = parseDate(pick(r, "createdate"));
         const ageDays = created ? -daysUntil(created) : null;
         const action = str(pick(r, "action")).toUpperCase();
@@ -123,25 +133,39 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
       });
       const order = { stuck_renewal: 0, overdue: 1, recent: 2 } as const;
       waitingItems.sort((a, b) => order[a.severity] - order[b.severity] || (b.ageDays ?? 0) - (a.ageDays ?? 0));
-      const failedItems = failed.map((r) => ({
-        company: pick(r, "Company"),
-        accountId: pick(r, "AccountId"),
-        account: pick(r, "Account"),
-        status: pick(r, "Status"),
-        errorDetails: pick(r, "ErrorDetails"),
+      const failedItems = (failed ?? []).map((r) => ({
+        target: pick(r, "Target"),
+        product: pick(r, "ProductName"),
+        action: pick(r, "Action"),
+        csp: pick(r, "CSP"),
+        // Vendor errors are long, escaped JSON blobs; the first 300 characters carry the code and description.
+        errorDetails: str(pick(r, "ErrorDetails")).replace(/\s+/g, " ").trim().slice(0, 300) || null,
       }));
+      const failedByProduct = Object.entries(
+        failedItems.reduce<Record<string, number>>((acc, f) => {
+          const key = str(f.product) || "(unknown)";
+          acc[key] = (acc[key] ?? 0) + 1;
+          return acc;
+        }, {}),
+      )
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .map(([product, count]) => ({ product, count }));
       return {
         summary: {
-          waiting: waitingItems.length,
-          stuckRenewals: waitingItems.filter((w) => w.severity === "stuck_renewal").length,
-          overdue: waitingItems.filter((w) => w.severity === "overdue").length,
-          failed: failedItems.length,
+          ...(waiting ? {
+            waiting: waitingItems.length,
+            stuckRenewals: waitingItems.filter((w) => w.severity === "stuck_renewal").length,
+            overdue: waitingItems.filter((w) => w.severity === "overdue").length,
+          } : {}),
+          ...(failed ? { failed: failedItems.length, failedByProduct } : {}),
         },
+        ...(errors.length ? { errors } : {}),
         suggestedAction:
-          "Investigate stuck/overdue items and failed requests with get_subscription. Retrying a failed provisioning " +
+          "Investigate stuck/overdue items and failed requests with get_subscription_status. Retrying a failed provisioning " +
           "(RetryLastFailedProvisioning) is a write operation and must be done in the Marketplace UI.",
-        waiting: waitingItems,
-        failed: failedItems,
+        ...(waiting ? { waiting: waitingItems } : {}),
+        ...(failed ? { failed: failedItems } : {}),
       };
     },
   });

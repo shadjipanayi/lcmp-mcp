@@ -148,6 +148,22 @@ describe("support tools", () => {
     assert.match(r.text, /PRODUCT_ACCOUNT required/);
   });
 
+  it("execute_report refuses blocked heavy reports without calling the API, and runs the others", async () => {
+    const asked: string[] = [];
+    const call = await connect({
+      ExecuteReport: (b) => {
+        asked.push(String(b.reportName));
+        return { Columns: [{ Name: "id", CellIndex: 0 }], Rows: [{ Cells: [1] }] };
+      },
+    });
+    const blocked = await call("execute_report", { reportName: "failed provisioning STATISTICS", parameters: {} });
+    assert.equal(blocked.isError, true);
+    assert.match(blocked.text, /disabled/);
+    const allowed = await call("execute_report", { reportName: "MSCSPSeats", parameters: {} });
+    assert.equal(JSON.parse(allowed.text).data.rowCount, 1);
+    assert.deepEqual(asked, ["MSCSPSeats"]);
+  });
+
   it("a timeout is reported as a timeout, not as not found", async () => {
     const call = await connect({
       GetCompany: () => {
