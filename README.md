@@ -99,7 +99,7 @@ with a loopback `HOST`.
 Every tool call writes one JSON line to stderr (`event: "tool_call"`, tool, marketplace, signed-in user, duration,
 outcome; no arguments), which Azure collects into Log Analytics.
 
-The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults).
+The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults). Step-by-step Azure deployment (Container Apps, Key Vault, Entra ID, Copilot Studio): [docs/deploy-azure.md](docs/deploy-azure.md).
 
 ## Good to know
 
