@@ -127,7 +127,7 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       // The list call has no end dates, so fetch each active subscription (capped) for its term.
       const listed = Array.isArray(subs) ? (subs as Rec[]) : [];
       const active = listed.filter((s) => s.AccountState !== "Terminated").slice(0, MAX_DETAILED_SUBSCRIPTIONS);
-      const fetched = await fetchSubscriptions(client, active.map((s) => Number(s.AccountId)));
+      const fetched = await fetchSubscriptions(client, active.map((s) => Number(s.AccountId)), "interactive");
       const detailed = new Map<string, Rec>();
       fetched.forEach((full, i) => {
         if (full instanceof Error) errors.push(`subscription ${str(active[i].AccountId)} details: ${full.message}`);

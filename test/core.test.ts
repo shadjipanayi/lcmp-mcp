@@ -10,7 +10,7 @@ import { MarketplaceRegistry, createMarketplace } from "../src/marketplaces.js";
 import { runReport, settle } from "../src/reports.js";
 import { seatRow } from "../src/seats.js";
 import { createServer } from "../src/server.js";
-import { describeSubscription } from "../src/subscription.js";
+import { describeSubscription, fetchSubscriptions } from "../src/subscription.js";
 import { redactSecrets } from "../src/tools/helpers.js";
 
 describe("redactSecrets", () => {
@@ -105,6 +105,29 @@ describe("Subscription module", () => {
     assert.equal(describeSubscription(sub, "Europe/Athens", late).daysLeft, 0);
     assert.equal(describeSubscription(sub, "UTC", late).daysLeft, 1);
     assert.equal(describeSubscription(sub, tz, now).endDateSource, "PriceProtectionEndDate");
+  });
+
+  it("fetches interactively on the quick lane, 2 at a time, and reviews on the bulk lane", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const lanes: unknown[] = [];
+    const client = {
+      async call(_op: string, body: Record<string, unknown> = {}, workload?: unknown) {
+        lanes.push(workload);
+        peak = Math.max(peak, ++inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        if (body.accountId === 3) throw new Error("timeout");
+        return { AccountId: body.accountId };
+      },
+    };
+    const got = await fetchSubscriptions(client, [1, 2, 3, 4, 5], "interactive");
+    assert.equal(peak, 2);
+    assert.ok(lanes.every((l) => l === "quick"));
+    assert.deepEqual(got.map((g) => (g instanceof Error ? "error" : (g as { AccountId: number }).AccountId)), [1, 2, "error", 4, 5]);
+    lanes.length = 0;
+    await fetchSubscriptions(client, [1, 2], "bulk");
+    assert.deepEqual(lanes, ["bulk", "bulk"]);
   });
 
   it("puts days left into the runbooks' urgency bands", () => {
