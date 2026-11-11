@@ -1,4 +1,5 @@
 import type { LcmpPort } from "./client.js";
+import { isBlockedReport } from "./knowledge.js";
 
 export type Rec = Record<string, unknown>;
 
@@ -32,16 +33,51 @@ export function reportToRecords(data: unknown): Rec[] | undefined {
   return records;
 }
 
+/**
+ * The one way to run a report: every report call (execute_report and the review tools) goes through here, so reports
+ * in BLOCKED_REPORTS are refused before anything reaches the API. Returns the raw ExecuteReport response.
+ */
+export async function executeReport(
+  client: LcmpPort,
+  reportName: string,
+  parameters: Record<string, unknown> = {},
+  columns?: string[],
+): Promise<unknown> {
+  if (isBlockedReport(reportName)) {
+    throw new Error(`The report "${reportName}" is disabled in this server because it overloads the platform.`);
+  }
+  return client.call("ExecuteReport", { reportName, parameters, ...(columns ? { columns } : {}) }, "heavy");
+}
+
 /** Runs a named report and returns its rows as records. */
 export async function runReport(
   client: LcmpPort,
   reportName: string,
   parameters: Record<string, unknown> = {},
 ): Promise<Rec[]> {
-  const data = await client.call("ExecuteReport", { reportName, parameters }, "heavy");
-  const records = reportToRecords(data);
+  const records = reportToRecords(await executeReport(client, reportName, parameters));
   if (!records) throw new Error(`Report "${reportName}" did not return a Columns/Rows table.`);
   return records;
+}
+
+/**
+ * Runs independent parts of a tool (reports, lists) side by side and keeps what worked: a failed part becomes a
+ * "<label>: <message>" entry in `errors` instead of failing the tool. Undefined parts are skipped.
+ * `allFailed` tells the caller when nothing at all came back, so it can fail instead of returning an empty result.
+ */
+export async function settle<T extends Record<string, Promise<unknown> | undefined>>(
+  parts: T,
+): Promise<{ values: { [K in keyof T]?: Awaited<T[K]> }; errors: string[]; allFailed: boolean }> {
+  const entries = Object.entries(parts).filter((e): e is [string, Promise<unknown>] => e[1] !== undefined);
+  const results = await Promise.allSettled(entries.map(([, p]) => p));
+  const values: Record<string, unknown> = {};
+  const errors: string[] = [];
+  results.forEach((r, i) => {
+    const label = entries[i][0];
+    if (r.status === "fulfilled") values[label] = r.value;
+    else errors.push(`${label}: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+  });
+  return { values: values as { [K in keyof T]?: Awaited<T[K]> }, errors, allFailed: entries.length > 0 && errors.length === entries.length };
 }
 
 /** Case-insensitive field lookup: report column names vary in casing between reports and marketplaces. */

@@ -135,6 +135,7 @@ export class LcmpClient implements LcmpPort {
     try {
       // Not through a lane: at most one check is in flight, and it must not wait behind a fan-out.
       const res = await this.send("PingPong", {}, token, this.config.timeoutMs);
+      await res.text(); // read the body so the connection can be reused
       if (!res.ok) throw new Error(`PingPong HTTP ${res.status}`);
       this.tokenVerifiedAt = this.now();
       return token;

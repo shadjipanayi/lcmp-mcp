@@ -13,7 +13,7 @@ import type { LcmpPort, Workload } from "../client.js";
 import { lookup } from "../errors.js";
 import type { InvoicePeriod } from "../invoices.js";
 import type { MarketplaceRegistry } from "../marketplaces.js";
-import { type Rec, str } from "../reports.js";
+import { type Rec, settle, str } from "../reports.js";
 import { type SubscriptionView, describeSubscription, fetchSubscriptions } from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
 
@@ -101,23 +101,20 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       const id = Number(account.AccountId);
       const role = await m.accounts.role(account);
       const hasChildren = role !== "customer";
-      const errors: string[] = [];
-      const section = async <T>(label: string, p: Promise<T>): Promise<T | undefined> => {
-        try {
-          return await p;
-        } catch (err) {
-          errors.push(`${label}: ${err instanceof Error ? err.message : String(err)}`);
-          return undefined;
-        }
-      };
-
-      const [parent, credit, users, subs, children] = await Promise.all([
+      // Each section is independent: one failing (e.g. a missing permission) doesn't hide the others.
+      const [parent, { values, errors }] = await Promise.all([
         m.accounts.resellerOf(account),
-        section("credit limit", client.call("GetCreditLimit", { accountId: id })),
-        section("users", client.call("GetUsers", { companyAccountId: id })),
-        hasChildren ? undefined : section("subscriptions", client.call("GetSubscriptions", { parentAccountId: id }, "heavy")),
-        hasChildren ? section(role === "root" ? "resellers" : "customers", client.call("GetCompanies", { parentAccountId: id }, "heavy")) : undefined,
+        settle({
+          "credit limit": client.call("GetCreditLimit", { accountId: id }),
+          users: client.call("GetUsers", { companyAccountId: id }),
+          subscriptions: hasChildren ? undefined : client.call("GetSubscriptions", { parentAccountId: id }, "heavy"),
+          [role === "root" ? "resellers" : "customers"]: hasChildren ? client.call("GetCompanies", { parentAccountId: id }, "heavy") : undefined,
+        }),
       ]);
+      const credit = values["credit limit"];
+      const users = values.users;
+      const subs = values.subscriptions;
+      const children = values[role === "root" ? "resellers" : "customers"];
 
       const userList = (Array.isArray(users) ? (users as Rec[]) : []).map((u) => ({
         accountId: u.AccountId,
@@ -130,7 +127,7 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       // The list call has no end dates, so fetch each active subscription (capped) for its term.
       const listed = Array.isArray(subs) ? (subs as Rec[]) : [];
       const active = listed.filter((s) => s.AccountState !== "Terminated").slice(0, MAX_DETAILED_SUBSCRIPTIONS);
-      const fetched = await fetchSubscriptions(client, active.map((s) => Number(s.AccountId)));
+      const fetched = await fetchSubscriptions(client, active.map((s) => Number(s.AccountId)), "interactive");
       const detailed = new Map<string, Rec>();
       fetched.forEach((full, i) => {
         if (full instanceof Error) errors.push(`subscription ${str(active[i].AccountId)} details: ${full.message}`);

@@ -1,8 +1,8 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MarketplaceRegistry } from "../marketplaces.js";
-import { BLOCKED_REPORTS, PRODUCT_CATALOGUE, REPORT_CATALOGUE, isBlockedReport } from "../knowledge.js";
-import { reportToRecords } from "../reports.js";
+import { BLOCKED_REPORTS, PRODUCT_CATALOGUE, REPORT_CATALOGUE } from "../knowledge.js";
+import { executeReport, reportToRecords } from "../reports.js";
 import { accountId, registerCompositeTool, registerReadTools, resellerContext } from "./helpers.js";
 
 const year = z.number().int().min(2000).max(2100).describe("Four-digit year, e.g. 2026.");
@@ -65,7 +65,8 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
     },
   ]);
 
-  // A composite tool rather than a plain read tool, so blocked reports are refused before anything reaches the API.
+  // A composite tool rather than a plain read tool, so it goes through executeReport, which refuses blocked reports
+  // before anything reaches the API.
   registerCompositeTool(server, registry, {
     name: "execute_report",
     title: "Run a report",
@@ -82,10 +83,7 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
       columns: z.array(z.string()).optional().describe("Optional subset of columns to return."),
     },
     run: async ({ reportName, parameters, columns }, client) => {
-      if (isBlockedReport(reportName)) {
-        throw new Error(`The report "${reportName}" is disabled in this server because it overloads the platform.`);
-      }
-      const data = await client.call("ExecuteReport", { reportName, parameters, ...(columns ? { columns } : {}) }, "heavy");
+      const data = await executeReport(client, reportName, parameters, columns);
       const records = reportToRecords(data);
       return records ? { rowCount: records.length, rows: records } : data;
     },

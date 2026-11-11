@@ -157,18 +157,37 @@ export async function fetchSubscription(client: LcmpPort, accountId: number, wor
   return sub?.AccountId !== undefined ? sub : undefined;
 }
 
+/** At most this many of one interactive tool call's fetches run at once, so it never holds every quick slot. */
+const INTERACTIVE_FAN_OUT = 2;
+
 /**
- * Full records for several subscriptions, in input order. They go through the client's bulk lane, which caps how
- * many run at once across all tools. A failed fetch is returned as its Error instead of failing the whole batch.
+ * Full records for several subscriptions, in input order. A failed fetch is returned as its Error instead of failing
+ * the whole batch.
+ * - "bulk" (default, for reviews that fetch up to hundreds): the client's bulk lane, shared FIFO by all tools.
+ * - "interactive" (a support lookup someone is waiting on, e.g. get_customer_overview): the quick lane, 2 at a time,
+ *   so it isn't queued behind a colleague's running review.
  */
-export async function fetchSubscriptions(client: LcmpPort, accountIds: number[]): Promise<(Rec | undefined | Error)[]> {
-  return Promise.all(
-    accountIds.map(async (id) => {
-      try {
-        return await fetchSubscription(client, id, "bulk");
-      } catch (err) {
-        return err instanceof Error ? err : new Error(String(err));
-      }
-    }),
-  );
+export async function fetchSubscriptions(
+  client: LcmpPort,
+  accountIds: number[],
+  mode: "bulk" | "interactive" = "bulk",
+): Promise<(Rec | undefined | Error)[]> {
+  const fetchOne = async (id: number) => {
+    try {
+      return await fetchSubscription(client, id, mode === "bulk" ? "bulk" : "quick");
+    } catch (err) {
+      return err instanceof Error ? err : new Error(String(err));
+    }
+  };
+  if (mode === "bulk") return Promise.all(accountIds.map(fetchOne));
+  const results = new Array<Rec | undefined | Error>(accountIds.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < accountIds.length) {
+      const i = next++;
+      results[i] = await fetchOne(accountIds[i]);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(INTERACTIVE_FAN_OUT, accountIds.length) }, worker));
+  return results;
 }
