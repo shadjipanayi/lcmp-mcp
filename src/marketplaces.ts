@@ -1,4 +1,4 @@
-import { LcmpClient } from "./client.js";
+import { LcmpClient, type LcmpPort } from "./client.js";
 
 /**
  * Country marketplaces: display name and local time zone (for "today" in date-based reports).
@@ -25,7 +25,7 @@ export interface Marketplace {
   code: string;
   name: string;
   timeZone: string;
-  client: LcmpClient;
+  client: LcmpPort;
 }
 
 /**
@@ -33,7 +33,7 @@ export interface Marketplace {
  *   LCMP_BASE_URL                     shared SimpleAPI URL
  *   LCMP_MARKETPLACES=CYMA,GR,...     codes to enable
  *   LCMP_<CODE>_USERNAME / _PASSWORD  read-only API user for each code
- *   LCMP_MAX_CONCURRENCY              API requests in flight per marketplace (default 3)
+ *   LCMP_MAX_CONCURRENCY              quick API requests in flight per marketplace (default 3)
  * Without LCMP_MARKETPLACES, LCMP_USERNAME / LCMP_PASSWORD configure a single marketplace (LCMP_MARKETPLACE, default "DEFAULT").
  */
 export function loadMarketplaces(env: NodeJS.ProcessEnv = process.env): Marketplace[] {

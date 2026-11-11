@@ -8,9 +8,9 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { LcmpClient } from "../client.js";
+import type { LcmpPort, Workload } from "../client.js";
 import { type MarketplaceRegistry, NotFoundError } from "../marketplaces.js";
-import { HEAVY_TIMEOUT_MS, type Rec, mapLimit, str } from "../reports.js";
+import { type Rec, str } from "../reports.js";
 import { type SubscriptionView, describeSubscription, fetchSubscriptions } from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
 
@@ -23,9 +23,9 @@ const first = (data: unknown): Rec | undefined =>
   Array.isArray(data) ? (data[0] as Rec | undefined) : data && typeof data === "object" ? (data as Rec) : undefined;
 
 /** Calls an operation and returns undefined instead of throwing (for optional sections and probing). */
-async function tryCall(client: LcmpClient, op: string, body: Rec, timeoutMs?: number): Promise<unknown> {
+async function tryCall(client: LcmpPort, op: string, body: Rec, workload?: Workload): Promise<unknown> {
   try {
-    return await client.call(op, body, timeoutMs);
+    return await client.call(op, body, workload);
   } catch {
     return undefined;
   }
@@ -55,7 +55,7 @@ async function lookup<T>(p: Promise<T>): Promise<T> {
  * Gets a company or reseller account by ID. Throws NotFoundError when the account isn't in this marketplace; any
  * other failure (timeout, outage) is thrown as is, so the user sees the real cause.
  */
-async function getAccount(client: LcmpClient, accountId: number): Promise<Rec> {
+async function getAccount(client: LcmpPort, accountId: number): Promise<Rec> {
   try {
     const company = first(await lookup(client.call("GetCompany", { accountId })));
     if (company?.AccountId !== undefined) return company;
@@ -82,7 +82,7 @@ async function optional<T>(p: Promise<T>): Promise<T | undefined> {
  * Finds one account by VAT ID. Several accounts can share a VAT ID (a short VAT ID returned 80 on CYMA), so more
  * than one match is an error that lists them, instead of silently picking the first.
  */
-async function accountByVat(client: LcmpClient, vatId: string): Promise<Rec> {
+async function accountByVat(client: LcmpPort, vatId: string): Promise<Rec> {
   for (const op of ["GetCompanyByVatId", "GetResellerByVatId"]) {
     const result = await optional(lookup(client.call(op, { vatId })));
     const list = (Array.isArray(result) ? result : result ? [result] : []) as Rec[];
@@ -136,14 +136,14 @@ function shared<T>(map: Map<string, Promise<T>>, key: string, load: () => Promis
  * Cached list of a marketplace's resellers (and, on demand, all their customers). Building the customer list
  * makes one GetCompanies call per reseller, so it is slow the first time; it is then cached for 6 hours.
  */
-async function getDirectory(code: string, client: LcmpClient, withCustomers: boolean): Promise<Directory> {
+async function getDirectory(code: string, client: LcmpPort, withCustomers: boolean): Promise<Directory> {
   let dir = directories.get(code);
   if (!dir || Date.now() - dir.at > DIRECTORY_TTL_MS) {
     dir = await shared(resellerLoads, code, async () => {
       const root = first(await client.call("GetCompany", {}));
       const rootId = Number(root?.AccountId);
       if (!rootId) throw new Error("Could not determine the marketplace root account.");
-      const resellers = (await client.call("GetCompanies", { parentAccountId: rootId }, HEAVY_TIMEOUT_MS)) as Rec[] | null;
+      const resellers = (await client.call("GetCompanies", { parentAccountId: rootId }, "heavy")) as Rec[] | null;
       const fresh: Directory = { at: Date.now(), rootId, resellers: Array.isArray(resellers) ? resellers : [] };
       directories.set(code, fresh);
       return fresh;
@@ -154,15 +154,16 @@ async function getDirectory(code: string, client: LcmpClient, withCustomers: boo
     const target = dir;
     await shared(customerLoads, code, async () => {
       let failed = 0;
-      const lists = await mapLimit(target.resellers, 4, async (r) => {
-        const companies = (await tryCall(client, "GetCompanies", { parentAccountId: r.AccountId })) as Rec[] | undefined;
+      // One call per reseller: the client's bulk lane caps how many run at once, so quick lookups stay responsive.
+      const lists = await Promise.all(target.resellers.map(async (r) => {
+        const companies = (await tryCall(client, "GetCompanies", { parentAccountId: r.AccountId }, "bulk")) as Rec[] | undefined;
         if (companies === undefined) failed++;
         return (Array.isArray(companies) ? companies : []).map((c) => ({
           ...c,
           _resellerName: r.CompanyName,
           _resellerAccountId: r.AccountId,
         }));
-      });
+      }));
       target.customers = lists.flat();
       target.failedResellers = failed;
     });
@@ -177,12 +178,12 @@ async function getDirectory(code: string, client: LcmpClient, withCustomers: boo
 const invoiceCache = new Map<string, { at: number; ttl: number; data: Rec[] }>();
 const invoiceLoads = new Map<string, Promise<Rec[]>>();
 
-async function getInvoices(code: string, client: LcmpClient, op: string, body: Rec): Promise<{ data: Rec[]; cachedAt: number }> {
+async function getInvoices(code: string, client: LcmpPort, op: string, body: Rec): Promise<{ data: Rec[]; cachedAt: number }> {
   const key = `${code}|${op}|${JSON.stringify(body)}`;
   const hit = invoiceCache.get(key);
   if (hit && Date.now() - hit.at < hit.ttl) return { data: hit.data, cachedAt: hit.at };
   const data = await shared(invoiceLoads, key, async () => {
-    const result = (await client.call(op, body, HEAVY_TIMEOUT_MS)) as Rec[] | null;
+    const result = (await client.call(op, body, "heavy")) as Rec[] | null;
     const list = Array.isArray(result) ? result : [];
     // Each entry is a whole country's month of invoices: drop expired ones so memory doesn't keep growing.
     for (const [k, v] of invoiceCache) if (Date.now() - v.at >= v.ttl) invoiceCache.delete(k);
@@ -300,8 +301,8 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
         !isReseller && account.ParentAccountId ? optional(getAccount(client, Number(account.ParentAccountId))) : undefined,
         section("credit limit", client.call("GetCreditLimit", { accountId: id })),
         section("users", client.call("GetUsers", { companyAccountId: id })),
-        isReseller ? undefined : section("subscriptions", client.call("GetSubscriptions", { parentAccountId: id }, HEAVY_TIMEOUT_MS)),
-        isReseller ? section("customers", client.call("GetCompanies", { parentAccountId: id }, HEAVY_TIMEOUT_MS)) : undefined,
+        isReseller ? undefined : section("subscriptions", client.call("GetSubscriptions", { parentAccountId: id }, "heavy")),
+        isReseller ? section("customers", client.call("GetCompanies", { parentAccountId: id }, "heavy")) : undefined,
       ]);
 
       const userList = (Array.isArray(users) ? (users as Rec[]) : []).map((u) => ({
@@ -432,7 +433,7 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
 
       let subscriptionIds = new Set<string>();
       if (!isReseller) {
-        const subs = (await tryCall(client, "GetSubscriptions", { parentAccountId: accountId }, HEAVY_TIMEOUT_MS)) as Rec[] | undefined;
+        const subs = (await tryCall(client, "GetSubscriptions", { parentAccountId: accountId }, "heavy")) as Rec[] | undefined;
         subscriptionIds = new Set((Array.isArray(subs) ? subs : []).map((s) => str(s.AccountId)));
       }
       const customerName = norm(account.CompanyName);

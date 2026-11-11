@@ -49,7 +49,7 @@ Configuration is through environment variables (template in `.env.example`):
 | `LCMP_MARKETPLACES` | Codes to enable: `CYMA, GR, ENET, RO, IT, SA, JO, LB, AE, QA, KW, OM, BH, MA` |
 | `LCMP_<CODE>_USERNAME` / `LCMP_<CODE>_PASSWORD` | The read-only API user for that marketplace (no MFA) |
 | `LCMP_TIMEOUT_MS` | Optional default timeout, 30000. Reports always use 300 s |
-| `LCMP_MAX_CONCURRENCY` | Optional, quick API requests in flight per marketplace user, default 3. Reports and big lists use a separate queue of 2, so they never hold up quick lookups. Extra calls wait |
+| `LCMP_MAX_CONCURRENCY` | Optional, quick API requests in flight per marketplace user, default 3. Reports and big lists use a separate queue of 2, and per-item fan-outs (e.g. one call per subscription) another queue of 2, so neither holds up quick lookups. Extra calls wait |
 
 With only `LCMP_USERNAME` / `LCMP_PASSWORD` (and no `LCMP_MARKETPLACES`), the server runs for one marketplace.
 For local runs, put the values in a `.env` file (git-ignored); `npm start`, `npm run dev` and `npm run inspect` load it.

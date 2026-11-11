@@ -2,7 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MarketplaceRegistry } from "../marketplaces.js";
 import { BLOCKED_REPORTS, PRODUCT_CATALOGUE, REPORT_CATALOGUE, isBlockedReport } from "../knowledge.js";
-import { HEAVY_TIMEOUT_MS, reportToRecords } from "../reports.js";
+import { reportToRecords } from "../reports.js";
 import { accountId, registerCompositeTool, registerReadTools, resellerContext } from "./helpers.js";
 
 const year = z.number().int().min(2000).max(2100).describe("Four-digit year, e.g. 2026.");
@@ -20,7 +20,7 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
         "Get invoice aggregation lines for a billing month. If year and month are omitted, the current billing interval is used. " +
         "For one customer's or reseller's invoice lines, use get_customer_invoices.",
       input: { year: year.optional(), month: month.optional(), resellerContext },
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
     },
     {
       name: "get_reports",
@@ -36,7 +36,7 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
         "List all accounts of a product, with their dynamic product fields (rows under AllProductAccountsWithFields, " +
         "product data under Fields). Slow on large marketplaces. " +
         PRODUCT_CATALOGUE,
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
       input: {
         productName: z.string().describe("Technical product name."),
         createdBefore: z.string().optional().describe("Only accounts created before this past date (YYYY-MM-DD)."),
@@ -85,7 +85,7 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
       if (isBlockedReport(reportName)) {
         throw new Error(`The report "${reportName}" is disabled in this server because it overloads the platform.`);
       }
-      const data = await client.call("ExecuteReport", { reportName, parameters, ...(columns ? { columns } : {}) }, HEAVY_TIMEOUT_MS);
+      const data = await client.call("ExecuteReport", { reportName, parameters, ...(columns ? { columns } : {}) }, "heavy");
       const records = reportToRecords(data);
       return records ? { rowCount: records.length, rows: records } : data;
     },

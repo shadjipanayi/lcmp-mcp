@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MarketplaceRegistry } from "../marketplaces.js";
-import { HEAVY_TIMEOUT_MS } from "../reports.js";
 import { accountId, registerReadTools } from "./helpers.js";
 
 /**
@@ -40,7 +39,7 @@ export function registerAccountTools(server: McpServer, registry: MarketplaceReg
       title: "List resellers",
       description: "List the first-level resellers under a parent Account ID."+" Returns compact rows (ID, name, type, state, VAT ID, country, currency, billing start); use get_company for full details.",
       transform: compactAccounts,
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
       input: { parentAccountId: accountId("parent") },
     },
     {
@@ -65,7 +64,7 @@ export function registerAccountTools(server: McpServer, registry: MarketplaceReg
         "List the first-level companies under a parent Account ID. Under the country root account these are the resellers; " +
         "under a reseller, its customers."+" Returns compact rows (ID, name, type, state, VAT ID, country, currency, billing start); use get_company for full details.",
       transform: compactAccounts,
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
       input: { parentAccountId: accountId("parent") },
     },
     {
@@ -88,7 +87,7 @@ export function registerAccountTools(server: McpServer, registry: MarketplaceReg
       title: "List departments",
       description: "List the first-level departments under a parent (company) Account ID."+" Returns compact rows (ID, name, type, state, VAT ID, country, currency, billing start); use get_department for full details.",
       transform: compactAccounts,
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
       input: { parentAccountId: accountId("parent") },
     },
     {
