@@ -1,4 +1,7 @@
+import { Accounts } from "./accounts.js";
 import { LcmpClient, type LcmpPort } from "./client.js";
+import { NotFoundError } from "./errors.js";
+import { Invoices } from "./invoices.js";
 
 /**
  * Country marketplaces: display name and local time zone (for "today" in date-based reports).
@@ -21,11 +24,19 @@ export const KNOWN_MARKETPLACES: Record<string, { name: string; timeZone: string
   MA: { name: "Morocco", timeZone: "Africa/Casablanca" },
 };
 
+/** One country marketplace: its API connection plus the modules (and caches) that belong to it. */
 export interface Marketplace {
   code: string;
   name: string;
   timeZone: string;
   client: LcmpPort;
+  accounts: Accounts;
+  invoices: Invoices;
+}
+
+/** Builds a marketplace around an API connection; a fresh marketplace has fresh caches. */
+export function createMarketplace(m: { code: string; name: string; timeZone: string; client: LcmpPort }): Marketplace {
+  return { ...m, accounts: new Accounts(m.client), invoices: new Invoices(m.client) };
 }
 
 /**
@@ -43,12 +54,13 @@ export function loadMarketplaces(env: NodeJS.ProcessEnv = process.env): Marketpl
   const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 30_000;
   const maxConcurrency = Number(env.LCMP_MAX_CONCURRENCY ?? 3) || 3;
 
-  const make = (code: string, username: string | undefined, password: string | undefined): Marketplace => ({
-    code,
-    name: KNOWN_MARKETPLACES[code]?.name ?? code,
-    timeZone: KNOWN_MARKETPLACES[code]?.timeZone ?? "UTC",
-    client: new LcmpClient({ baseUrl, username: username!.trim(), password: password!, timeoutMs, maxConcurrency }),
-  });
+  const make = (code: string, username: string | undefined, password: string | undefined): Marketplace =>
+    createMarketplace({
+      code,
+      name: KNOWN_MARKETPLACES[code]?.name ?? code,
+      timeZone: KNOWN_MARKETPLACES[code]?.timeZone ?? "UTC",
+      client: new LcmpClient({ baseUrl, username: username!.trim(), password: password!, timeoutMs, maxConcurrency }),
+    });
 
   const codes = (env.LCMP_MARKETPLACES ?? "")
     .split(",")
@@ -103,16 +115,7 @@ export class MarketplaceRegistry {
   }
 }
 
-/**
- * Thrown by lookups when the API says an account isn't in this marketplace. Carries the API's wording, because the
- * API uses the same message for "wrong ID" and "this user lacks a permission".
- */
-export class NotFoundError extends Error {
-  constructor(readonly apiMessage?: string) {
-    super(apiMessage ?? "not found");
-    this.name = "NotFoundError";
-  }
-}
+export { NotFoundError };
 
 /**
  * Runs `fn` against the selected marketplace and labels the result with its code. A lookup that returns undefined

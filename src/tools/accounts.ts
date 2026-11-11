@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { accountRow } from "../accounts.js";
 import type { MarketplaceRegistry } from "../marketplaces.js";
 import { accountId, registerReadTools } from "./helpers.js";
 
@@ -9,19 +10,7 @@ import { accountId, registerReadTools } from "./helpers.js";
  */
 export function compactAccounts(data: unknown): unknown {
   if (!Array.isArray(data)) return data;
-  return {
-    count: data.length,
-    accounts: data.map((a: Record<string, unknown>) => ({
-      accountId: a.AccountId,
-      name: a.CompanyName,
-      type: a.AccountType ?? null,
-      state: a.AccountState ?? null,
-      vatId: a.VATID ?? null,
-      country: a.Country ?? null,
-      currency: a.Currency ?? null,
-      billingStartDate: a.BillingStartDate ?? null,
-    })),
-  };
+  return { count: data.length, accounts: data.map(accountRow) };
 }
 
 export function registerAccountTools(server: McpServer, registry: MarketplaceRegistry): void {

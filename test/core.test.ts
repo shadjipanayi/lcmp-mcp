@@ -6,7 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
 import { createEntraVerifier } from "../src/auth.js";
 import type { LcmpPort } from "../src/client.js";
-import { MarketplaceRegistry } from "../src/marketplaces.js";
+import { MarketplaceRegistry, createMarketplace } from "../src/marketplaces.js";
 import { createServer } from "../src/server.js";
 import { describeSubscription } from "../src/subscription.js";
 import { redactSecrets } from "../src/tools/helpers.js";
@@ -153,7 +153,7 @@ async function connect(handlers: Record<string, (body: Record<string, unknown>) 
       return h(body);
     },
   };
-  const registry = new MarketplaceRegistry([{ code: "GR", name: "Greece", timeZone: "Europe/Athens", client: fake }]);
+  const registry = new MarketplaceRegistry([createMarketplace({ code: "GR", name: "Greece", timeZone: "Europe/Athens", client: fake })]);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createServer(registry).connect(serverSide);
   const client = new Client({ name: "test", version: "0" });
@@ -246,6 +246,61 @@ describe("support tools", () => {
       assert.equal(v.effectiveEndDateAction, "Renew");
       assert.equal(v.endDate, "2027-05-27");
     }
+  });
+
+  it("tells the marketplace root from resellers by its ID, though both are labelled Reseller", async () => {
+    const call = await connect({
+      GetCompany: (b) => {
+        if (b.accountId === undefined || b.accountId === 1) return [{ AccountId: 1, CompanyName: "Logicom Greece", AccountType: "Reseller" }];
+        throw new Error("GetCompany failed (HTTP 500): Invalid account id");
+      },
+      GetReseller: (b) => [{ AccountId: b.accountId, CompanyName: "PC Systems", AccountType: "Reseller", ParentAccountId: 1 }],
+      GetCompanies: (b) => (b.parentAccountId === 1 ? [{ AccountId: 20, CompanyName: "PC Systems" }] : [{ AccountId: 30, CompanyName: "Acme SA" }]),
+      GetCreditLimit: () => null,
+      GetUsers: () => [],
+    });
+    const root = JSON.parse((await call("get_customer_overview", { accountId: 1 })).text).data;
+    assert.equal(root.account.role, "root");
+    assert.equal(root.resellers[0].name, "PC Systems");
+    const reseller = JSON.parse((await call("get_customer_overview", { accountId: 20 })).text).data;
+    assert.equal(reseller.account.role, "reseller");
+    assert.equal(reseller.customers[0].name, "Acme SA");
+  });
+
+  it("each marketplace keeps its own name-search directory", async () => {
+    const directory = (name: string) => ({
+      GetCompany: () => [{ AccountId: 1, CompanyName: "Root" }],
+      GetCompanyByVatId: () => [],
+      GetResellerByVatId: () => [],
+      GetCompanies: (b: Record<string, unknown>) => (b.parentAccountId === 1 ? [{ AccountId: 2, CompanyName: "Reseller" }] : [{ AccountId: 3, CompanyName: name }]),
+    });
+    const first = await connect(directory("Alpha Ltd"));
+    assert.equal(JSON.parse((await first("find_account", { query: "alpha" })).text).data.matches[0].name, "Alpha Ltd");
+    // Same marketplace code, different (fresh) marketplace: it must not see the first one's cached customers.
+    const second = await connect(directory("Beta Ltd"));
+    assert.equal((await second("find_account", { query: "alpha" })).isError, true);
+    assert.equal(JSON.parse((await second("find_account", { query: "beta" })).text).data.matches[0].name, "Beta Ltd");
+  });
+
+  it("a failed VAT lookup is reported, not shown as no match", async () => {
+    const handlers = {
+      GetCompany: (b: Record<string, unknown>) => {
+        if (b.accountId === undefined) return [{ AccountId: 1, CompanyName: "Root" }];
+        throw new Error("GetCompany failed (HTTP 500): Invalid account id");
+      },
+      GetCompanyByVatId: () => {
+        throw new Error("The operation was aborted due to timeout");
+      },
+      GetResellerByVatId: () => [],
+      GetCompanies: () => [{ AccountId: 2, CompanyName: "Acme Reseller" }],
+    };
+    const call = await connect(handlers);
+    const none = await call("find_account", { query: "094014201", includeCustomers: false });
+    assert.equal(none.isError, true);
+    assert.match(none.text, /timeout/);
+    const some = JSON.parse((await call("find_account", { query: "acme", includeCustomers: false })).text).data;
+    assert.equal(some.matches[0].name, "Acme Reseller");
+    assert.match(some.warnings[0], /VAT ID lookup failed/);
   });
 
   it("a timeout is reported as a timeout, not as not found", async () => {

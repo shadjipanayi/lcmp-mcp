@@ -20,6 +20,48 @@ export class LcmpApiError extends Error {
   }
 }
 
+/**
+ * Thrown by lookups when the API says an account isn't in this marketplace. Carries the API's wording, because the
+ * API uses the same message for "wrong ID" and "this user lacks a permission".
+ */
+export class NotFoundError extends Error {
+  constructor(readonly apiMessage?: string) {
+    super(apiMessage ?? "not found");
+    this.name = "NotFoundError";
+  }
+}
+
+/**
+ * API errors that mean "this account isn't in this marketplace", as opposed to timeouts or outages. Observed on the
+ * live API: unknown IDs give "Invalid account id"; accounts of another country give "Not enough permissions to get
+ * account details"; subscriptions outside the user's tree give "Not enough permissions to execute ... for the AccountId".
+ */
+const NOT_FOUND =
+  /invalid account|not found|does not exist|not enough permissions to get account details|not enough permissions to execute .* for the accountid/i;
+
+const messageOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
+
+/** Runs a lookup; turns the API's "not in this marketplace" errors into NotFoundError, rethrows anything else. */
+export async function lookup<T>(p: Promise<T>): Promise<T> {
+  try {
+    return await p;
+  } catch (err) {
+    if (err instanceof NotFoundError) throw err;
+    if (NOT_FOUND.test(messageOf(err))) throw new NotFoundError(messageOf(err));
+    throw err;
+  }
+}
+
+/** For optional lookups (a parent reseller, a subscription's customer): undefined instead of NotFoundError. */
+export async function optional<T>(p: Promise<T>): Promise<T | undefined> {
+  try {
+    return await p;
+  } catch (err) {
+    if (err instanceof NotFoundError) return undefined;
+    throw err;
+  }
+}
+
 const parser = new XMLParser({
   ignoreAttributes: true,
   removeNSPrefix: true,
