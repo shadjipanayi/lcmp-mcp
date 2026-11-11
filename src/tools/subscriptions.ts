@@ -1,7 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { MarketplaceRegistry } from "../marketplaces.js";
-import { HEAVY_TIMEOUT_MS } from "../reports.js";
 import { accountId, registerReadTools, resellerContext } from "./helpers.js";
 
 export function registerSubscriptionTools(server: McpServer, registry: MarketplaceRegistry): void {
@@ -20,7 +19,7 @@ export function registerSubscriptionTools(server: McpServer, registry: Marketpla
       description:
         "List all subscriptions under a parent (company) Account ID, one compact row each (ID, service, state, " +
         "provisioning status, error). Use get_subscription or get_subscription_status for fields and end dates.",
-      timeoutMs: HEAVY_TIMEOUT_MS,
+      workload: "heavy",
       transform: (data) =>
         Array.isArray(data)
           ? {

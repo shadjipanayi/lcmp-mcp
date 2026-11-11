@@ -6,15 +6,13 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { LcmpClient } from "../client.js";
+import type { LcmpPort } from "../client.js";
 import { PRODUCT_CODES } from "../knowledge.js";
 import type { MarketplaceRegistry } from "../marketplaces.js";
 import {
-  HEAVY_TIMEOUT_MS,
   type Rec,
   daysUntil,
   isoDay,
-  mapLimit,
   num,
   parseDate,
   pick,
@@ -180,7 +178,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
       // The two halves need different permissions; report a failure in one without losing the other.
       const [limitsResult, ordersResult] = await Promise.allSettled([
         runReport(client, "Credit Limits"),
-        client.call("ListCreditCheckOrdersForApproval", {}, HEAVY_TIMEOUT_MS) as Promise<Rec[] | null>,
+        client.call("ListCreditCheckOrdersForApproval", {}, "heavy") as Promise<Rec[] | null>,
       ]);
       const errors: string[] = [];
       if (limitsResult.status === "rejected") errors.push(`credit limits: ${String(limitsResult.reason?.message ?? limitsResult.reason)}`);
@@ -491,7 +489,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     },
     run: async ({ product = "azure_plan", mode = "growth", minForecast = 1000, minChangePercent = 20 }, client) => {
       const productName = product === "aws_account" ? PRODUCT_CODES.awsAccount : PRODUCT_CODES.azurePlan;
-      const data = (await client.call("GetAllProductAccountsWithFieldsReport", { productName }, HEAVY_TIMEOUT_MS)) as Rec | null;
+      const data = (await client.call("GetAllProductAccountsWithFieldsReport", { productName }, "heavy")) as Rec | null;
       const accounts = Array.isArray(data?.AllProductAccountsWithFields) ? (data!.AllProductAccountsWithFields as Rec[]) : [];
 
       const rows = accounts.map((a) => {

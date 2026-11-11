@@ -1,10 +1,4 @@
-import type { LcmpClient } from "./client.js";
-
-/**
- * Heavy reports (MSCSPSeats, Credit Limits, GetAllProductAccountsWithFieldsReport, ...) can take minutes on large
- * marketplaces. The production runbooks use 300 s, so composite tools do the same.
- */
-export const HEAVY_TIMEOUT_MS = 300_000;
+import type { LcmpPort } from "./client.js";
 
 export type Rec = Record<string, unknown>;
 
@@ -40,11 +34,11 @@ export function reportToRecords(data: unknown): Rec[] | undefined {
 
 /** Runs a named report and returns its rows as records. */
 export async function runReport(
-  client: LcmpClient,
+  client: LcmpPort,
   reportName: string,
   parameters: Record<string, unknown> = {},
 ): Promise<Rec[]> {
-  const data = await client.call("ExecuteReport", { reportName, parameters }, HEAVY_TIMEOUT_MS);
+  const data = await client.call("ExecuteReport", { reportName, parameters }, "heavy");
   const records = reportToRecords(data);
   if (!records) throw new Error(`Report "${reportName}" did not return a Columns/Rows table.`);
   return records;
@@ -100,18 +94,4 @@ export function todayIn(timeZone: string, now = new Date()): string {
 
 export function isoDay(date: Date | undefined): string | null {
   return date ? date.toISOString().slice(0, 10) : null;
-}
-
-/** Runs `fn` over `items` with at most `limit` calls in flight, preserving order. */
-export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) => Promise<R>): Promise<R[]> {
-  const results = new Array<R>(items.length);
-  let next = 0;
-  const worker = async () => {
-    while (next < items.length) {
-      const i = next++;
-      results[i] = await fn(items[i]);
-    }
-  };
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return results;
 }

@@ -1,6 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { LcmpClient } from "../client.js";
+import type { LcmpPort, Workload } from "../client.js";
 import { type Marketplace, type MarketplaceRegistry, runInMarketplace } from "../marketplaces.js";
 
 /** Responses larger than this are truncated so a big list does not flood the model's context. */
@@ -16,8 +16,8 @@ export interface ReadToolSpec {
   input?: z.ZodRawShape;
   /** Optional reshaping of the API response before it is returned to the model. */
   transform?: (data: unknown) => unknown;
-  /** Optional per-call timeout override, for slow report operations. */
-  timeoutMs?: number;
+  /** "heavy" for reports and big lists that take minutes; the client picks the timeout and lane. */
+  workload?: Workload;
 }
 
 export interface CompositeToolSpec<Shape extends z.ZodRawShape> {
@@ -26,7 +26,7 @@ export interface CompositeToolSpec<Shape extends z.ZodRawShape> {
   description: string;
   input?: Shape;
   /** Chains read calls against one marketplace and returns the data to show the model (undefined = not found). */
-  run: (args: z.infer<z.ZodObject<Shape>>, client: LcmpClient, marketplace: Marketplace) => Promise<unknown>;
+  run: (args: z.infer<z.ZodObject<Shape>>, client: LcmpPort, marketplace: Marketplace) => Promise<unknown>;
 }
 
 /** The `marketplace` input every tool gets: required when several marketplaces are configured. */
@@ -142,7 +142,7 @@ export function registerReadTool(server: McpServer, registry: MarketplaceRegistr
     },
     (args: Record<string, unknown>, ctx: CallContext) =>
       handle(spec.name, registry, args, ctx, async (m, rest) => {
-        const raw = await m.client.call(spec.operation, compact(rest), spec.timeoutMs);
+        const raw = await m.client.call(spec.operation, compact(rest), spec.workload);
         return spec.transform ? spec.transform(raw) : raw;
       }),
   );

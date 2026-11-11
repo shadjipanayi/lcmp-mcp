@@ -5,7 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
 import { createEntraVerifier } from "../src/auth.js";
-import type { LcmpClient } from "../src/client.js";
+import type { LcmpPort } from "../src/client.js";
 import { MarketplaceRegistry } from "../src/marketplaces.js";
 import { createServer } from "../src/server.js";
 import { describeSubscription } from "../src/subscription.js";
@@ -146,13 +146,13 @@ describe("Entra token check", async () => {
 
 /** Starts the real MCP server over an in-memory link, with a fake API client that answers from `handlers`. */
 async function connect(handlers: Record<string, (body: Record<string, unknown>) => unknown>) {
-  const fake = {
+  const fake: LcmpPort = {
     async call(op: string, body: Record<string, unknown> = {}) {
       const h = handlers[op];
       if (!h) throw new Error(`${op} failed (HTTP 500): Invalid account id`);
       return h(body);
     },
-  } as unknown as LcmpClient;
+  };
   const registry = new MarketplaceRegistry([{ code: "GR", name: "Greece", timeZone: "Europe/Athens", client: fake }]);
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   await createServer(registry).connect(serverSide);

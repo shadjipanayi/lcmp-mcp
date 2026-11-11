@@ -4,15 +4,12 @@
  * end-date action or urgency themselves, so every tool gives the same answer for the same subscription.
  * Terms (CSP model, Legacy monthly, stored/effective end-date action, days left, urgency) are defined in GLOSSARY.md.
  */
-import type { LcmpClient } from "./client.js";
-import { type Rec, daysUntil, isoDay, mapLimit, parseDate, str, todayIn } from "./reports.js";
+import type { LcmpPort, Workload } from "./client.js";
+import { type Rec, daysUntil, isoDay, parseDate, str, todayIn } from "./reports.js";
 
 export type CspModel = "NCE" | "Legacy";
 export type Urgency = "past_end_date" | "urgent" | "soon" | "later";
 export type EndDateSource = "PriceProtectionEndDate" | "AdvancePeriodEndDate" | "Subscriptionenddate field" | "ContractEndDate";
-
-/** Parallel GetSubscription calls per tool run; the API times out under heavy load, so stay gentle. */
-const FETCH_CONCURRENCY = 4;
 
 /**
  * CSP model of a product. NCE products carry the literal "(NCE)" in their display name. Only Microsoft CSP licences
@@ -155,21 +152,23 @@ const first = (data: unknown): Rec | undefined =>
   Array.isArray(data) ? (data[0] as Rec | undefined) : data && typeof data === "object" ? (data as Rec) : undefined;
 
 /** One subscription's full record (with dates and fields), or undefined when the API returns nothing. */
-export async function fetchSubscription(client: LcmpClient, accountId: number): Promise<Rec | undefined> {
-  const sub = first(await client.call("GetSubscription", { accountId }));
+export async function fetchSubscription(client: LcmpPort, accountId: number, workload: Workload = "quick"): Promise<Rec | undefined> {
+  const sub = first(await client.call("GetSubscription", { accountId }, workload));
   return sub?.AccountId !== undefined ? sub : undefined;
 }
 
 /**
- * Full records for several subscriptions, a few at a time, in input order. A failed fetch is returned as its Error
- * instead of failing the whole batch.
+ * Full records for several subscriptions, in input order. They go through the client's bulk lane, which caps how
+ * many run at once across all tools. A failed fetch is returned as its Error instead of failing the whole batch.
  */
-export async function fetchSubscriptions(client: LcmpClient, accountIds: number[]): Promise<(Rec | undefined | Error)[]> {
-  return mapLimit(accountIds, FETCH_CONCURRENCY, async (id) => {
-    try {
-      return await fetchSubscription(client, id);
-    } catch (err) {
-      return err instanceof Error ? err : new Error(String(err));
-    }
-  });
+export async function fetchSubscriptions(client: LcmpPort, accountIds: number[]): Promise<(Rec | undefined | Error)[]> {
+  return Promise.all(
+    accountIds.map(async (id) => {
+      try {
+        return await fetchSubscription(client, id, "bulk");
+      } catch (err) {
+        return err instanceof Error ? err : new Error(String(err));
+      }
+    }),
+  );
 }
