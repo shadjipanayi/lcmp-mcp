@@ -46,3 +46,17 @@ Config is via env vars: `LCMP_BASE_URL`, `LCMP_MARKETPLACES` (codes) and `LCMP_<
 - stdout is the MCP transport: never `console.log` in server code; log to stderr (`console.error`).
 - ESM with `NodeNext` resolution: relative imports must use the `.js` extension.
 - All tools are read-only (`readOnlyHint: true`); don't add write operations.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues for `shadjipanayi/lcmp-mcp`, managed with the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+The five default labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: one `GLOSSARY.md` and `docs/adr/` at the repo root, created only when needed. See `docs/agents/domain.md`.
