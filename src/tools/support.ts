@@ -10,7 +10,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { LcmpClient } from "../client.js";
 import { type MarketplaceRegistry, NotFoundError } from "../marketplaces.js";
-import { HEAVY_TIMEOUT_MS, type Rec, isNce, mapLimit, str, subscriptionTerm } from "../reports.js";
+import { HEAVY_TIMEOUT_MS, type Rec, mapLimit, str } from "../reports.js";
+import { type SubscriptionView, describeSubscription, fetchSubscriptions } from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
 
 const DIRECTORY_TTL_MS = 6 * 60 * 60 * 1000;
@@ -213,32 +214,9 @@ function totalsBy(lines: Rec[], key: (l: Rec) => string, limit: number) {
 
 const norm = (s: unknown) => str(s).toLowerCase().replace(/[\s.\-_/]/g, "");
 
-/**
- * NCE vs Legacy only applies to Microsoft CSP licences. Microsoft products have technical names starting with
- * "156469_"; tenants, Azure Plans and reserved instances are not licences, so they get no model.
- */
-function cspModel(sub: Rec): "NCE" | "Legacy" | null {
-  const display = str(sub.ServiceDisplayName);
-  const technical = str(sub.ServiceName);
-  if (isNce(display)) return "NCE";
-  if (!technical.startsWith("156469_")) return null;
-  if (/tenant|AzurePlan|AzureReserved|AzureRI|AzureSubscription/i.test(technical)) return null;
-  return "Legacy";
-}
-
-function subscriptionSummary(sub: Rec) {
-  return {
-    accountId: sub.AccountId,
-    service: sub.ServiceDisplayName ?? sub.ServiceName,
-    vendor: sub.VendorDisplayName ?? null,
-    model: cspModel(sub),
-    state: sub.AccountState,
-    // The live API returns ProvisioningStatus; the spec documents Status.
-    status: sub.ProvisioningStatus ?? sub.Status ?? null,
-    ...subscriptionTerm(sub),
-    scheduledTerminationDate: sub.ScheduledTerminationDate ?? null,
-    errorDetails: sub.ErrorDetails || null,
-  };
+/** A subscription row in get_customer_overview: the shared view without the per-subscription notes. */
+function subscriptionRow({ notes: _notes, ...view }: SubscriptionView) {
+  return view;
 }
 
 export function registerSupportTools(server: McpServer, registry: MarketplaceRegistry): void {
@@ -296,13 +274,14 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
     title: "Customer overview",
     description:
       "One-call summary of a customer company or reseller: account details, its reseller, credit limit, users and " +
-      "subscriptions (service, NCE/Legacy, state, provisioning status/errors, end date and days left). For a reseller, " +
-      "lists its customers instead of subscriptions.",
+      "subscriptions (service, CSP model NCE/Legacy, state, provisioning status/errors, end date, days left, urgency and " +
+      "end-date action). For a reseller, lists its customers instead of subscriptions. " +
+      "Urgency: 'past_end_date' (<0 days left), 'urgent' (0-31), 'soon' (32-60), 'later'.",
     input: {
       accountId: z.number().int().optional().describe("Company or reseller Account ID."),
       vatId: z.string().optional().describe("VAT ID, if the Account ID is not known."),
     },
-    run: async ({ accountId, vatId }, client) => {
+    run: async ({ accountId, vatId }, client, m) => {
       if (accountId === undefined && !vatId) throw new Error("Give accountId or vatId (use find_account to search by name).");
       const account = accountId !== undefined ? await getAccount(client, accountId) : await accountByVat(client, vatId!);
       const id = Number(account.AccountId);
@@ -336,13 +315,14 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       // The list call has no end dates, so fetch each active subscription (capped) for its term.
       const listed = Array.isArray(subs) ? (subs as Rec[]) : [];
       const active = listed.filter((s) => s.AccountState !== "Terminated").slice(0, MAX_DETAILED_SUBSCRIPTIONS);
+      const fetched = await fetchSubscriptions(client, active.map((s) => Number(s.AccountId)));
       const detailed = new Map<string, Rec>();
-      await mapLimit(active, 4, async (s) => {
-        const full = first(await tryCall(client, "GetSubscription", { accountId: s.AccountId }));
-        if (full) detailed.set(str(s.AccountId), full);
+      fetched.forEach((full, i) => {
+        if (full instanceof Error) errors.push(`subscription ${str(active[i].AccountId)} details: ${full.message}`);
+        else if (full) detailed.set(str(active[i].AccountId), full);
       });
-      const subList = listed.map((s) => subscriptionSummary(detailed.get(str(s.AccountId)) ?? s));
-      subList.sort((a, b) => (a.state === b.state ? (a.daysUntilEnd ?? 1e9) - (b.daysUntilEnd ?? 1e9) : a.state === "Active" ? -1 : 1));
+      const subList = listed.map((s) => subscriptionRow(describeSubscription(detailed.get(str(s.AccountId)) ?? s, m.timeZone)));
+      subList.sort((a, b) => (a.state === b.state ? (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9) : a.state === "Active" ? -1 : 1));
       const customerList = (Array.isArray(customers) ? (customers as Rec[]) : []).map((c) => ({
         accountId: c.AccountId,
         name: c.CompanyName,
@@ -361,7 +341,8 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
                 total: subList.length,
                 active: subList.filter((s) => s.state === "Active").length,
                 withErrors: subList.filter((s) => s.errorDetails).length,
-                endingWithin31Days: subList.filter((s) => s.state === "Active" && s.daysUntilEnd !== null && s.daysUntilEnd >= 0 && s.daysUntilEnd <= 31).length,
+                activeUrgent: subList.filter((s) => s.state === "Active" && s.urgency === "urgent").length,
+                activePastEndDate: subList.filter((s) => s.state === "Active" && s.urgency === "past_end_date").length,
                 scheduledForTermination: subList.filter((s) => s.scheduledTerminationDate).length,
               },
               subscriptions: subList,
@@ -377,12 +358,13 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
     name: "get_subscription_status",
     title: "Subscription status",
     description:
-      "Explain one subscription: service, NCE/Legacy model, state and provisioning status (with vendor error details), " +
-      "end date (price-protection end, else advance-period end, else the Subscriptionenddate field), days left, " +
-      "end-date action (Renew/Terminate) where the API returns it, scheduled termination, vendor references, product " +
-      "fields and add-ons, plus the customer and reseller it belongs to.",
+      "Explain one subscription: service, CSP model (NCE/Legacy), state and provisioning status (with vendor error " +
+      "details), end date (price-protection end, else advance-period end, else the Subscriptionenddate field, else the " +
+      "contract end date), days left, urgency, the stored end-date action and the effective one (Legacy monthly " +
+      "subscriptions always renew), scheduled termination, vendor references, product fields and add-ons, plus the " +
+      "customer and reseller it belongs to.",
     input: { accountId: z.number().int().describe("The subscription Account ID.") },
-    run: async ({ accountId }, client) => {
+    run: async ({ accountId }, client, m) => {
       const sub = first(
         (await tryCall(client, "GetSubscriptionWithAddons", { accountId })) ?? (await lookup(client.call("GetSubscription", { accountId }))),
       );
@@ -390,18 +372,15 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       const company = sub.CompanyAccountId ? await optional(getAccount(client, Number(sub.CompanyAccountId))) : undefined;
       const reseller = company?.ParentAccountId ? await optional(getAccount(client, Number(company.ParentAccountId))) : undefined;
       const fields = Array.isArray(sub.Fields) ? Object.fromEntries((sub.Fields as Rec[]).map((f) => [str(f.Name), f.Value])) : {};
-      const summary = subscriptionSummary(sub);
+      const { notes: viewNotes, ...view } = describeSubscription(sub, m.timeZone);
 
       const notes: string[] = [];
-      if (summary.errorDetails) notes.push("Provisioning failed: see errorDetails. Retrying is done in the Marketplace UI (RetryLastFailedProvisioning).");
-      if (summary.scheduledTerminationDate) notes.push(`Termination is scheduled for ${summary.scheduledTerminationDate}.`);
-      if (summary.daysUntilEnd !== null && summary.daysUntilEnd < 0 && summary.state === "Active")
-        notes.push("End date is in the past but the subscription is still active: check the renewal.");
-      else if (summary.daysUntilEnd !== null && summary.daysUntilEnd <= 31) notes.push("Term ends within 31 days.");
+      if (view.errorDetails) notes.push("Provisioning failed: see errorDetails. Retrying is done in the Marketplace UI (RetryLastFailedProvisioning).");
+      if (view.scheduledTerminationDate) notes.push(`Termination is scheduled for ${view.scheduledTerminationDate}.`);
+      notes.push(...viewNotes);
 
       return {
-        ...summary,
-        endDateAction: sub.AdvancePeriodEndAction ?? null,
+        ...view,
         hasRenewActionValuesConfigured: sub.HasRenewActionValuesConfigured ?? null,
         priceProtectionEndDate: sub.PriceProtectionEndDate ?? null,
         advancePeriodEndDate: sub.AdvancePeriodEndDate ?? null,

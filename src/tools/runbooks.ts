@@ -13,8 +13,6 @@ import {
   HEAVY_TIMEOUT_MS,
   type Rec,
   daysUntil,
-  isNce,
-  isTrial,
   isoDay,
   mapLimit,
   num,
@@ -22,40 +20,31 @@ import {
   pick,
   runReport,
   str,
-  subscriptionTerm,
   todayIn,
 } from "../reports.js";
+import {
+  type SubscriptionView,
+  cspModel,
+  daysLeft,
+  describeSubscription,
+  fetchSubscriptions,
+  hasMonthlyTerm,
+  isTrial,
+  urgency,
+} from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
-
-/** Parallel GetSubscription calls per tool run; the API times out under heavy load, so stay gentle. */
-const SUBSCRIPTION_CONCURRENCY = 4;
 
 const bool = (v: unknown) => v === true || /^true$/i.test(str(v));
 
-/**
- * Monthly-term subscriptions renew every month: NCE billing types end in "P1M" (e.g. "Monthly (with 1-month
- * commitment) - P1M"), and legacy CSP licences without advance payment are month-to-month.
- */
-function isMonthlyTerm(billingType: unknown, nce: boolean, hasAdvancePayment: boolean): boolean {
-  if (/P1M|1-month commitment/i.test(str(billingType))) return true;
-  return !nce && !hasAdvancePayment;
-}
-
-interface SubscriptionTerm {
-  endDate: string | null;
-  daysUntilEnd: number | null;
-  endDateAction: string | null;
-}
-
-/**
- * End date (shared subscriptionTerm precedence) and end-date action of a subscription.
- * Legacy subscriptions without advance payment always renew monthly.
- */
-async function getSubscriptionTerm(client: LcmpClient, accountId: number, legacyMonthly: boolean): Promise<SubscriptionTerm> {
-  const sub = (await client.call("GetSubscription", { accountId })) as Rec | null;
-  if (!sub) return { endDate: null, daysUntilEnd: null, endDateAction: null };
-  const { endDate, daysUntilEnd } = subscriptionTerm(sub);
-  return { endDate, daysUntilEnd, endDateAction: legacyMonthly ? "Renew" : str(sub.AdvancePeriodEndAction) || null };
+/** The parts of the shared subscription view the review tools report. */
+function termOf(view: SubscriptionView) {
+  return {
+    endDate: view.endDate,
+    daysLeft: view.daysLeft,
+    urgency: view.urgency,
+    storedEndDateAction: view.storedEndDateAction,
+    effectiveEndDateAction: view.effectiveEndDateAction,
+  };
 }
 
 /**
@@ -286,7 +275,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
         .optional()
         .describe("Also list monthly-term subscriptions (NCE P1M, legacy monthly), which renew every month (default false)."),
     },
-    run: async ({ withinDays = 60, maxSubscriptions = 150, includeMonthlyTerms = false }, client) => {
+    run: async ({ withinDays = 60, maxSubscriptions = 150, includeMonthlyTerms = false }, client, m) => {
       const [priceProtected, seats, scheduled] = await Promise.all([
         runReport(client, "Price Protected Services"),
         runReport(client, "MSCSPSeats"),
@@ -306,7 +295,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
       const shortlist = [...earliest.values()]
         .map((r) => {
           const end = parseDate(pick(r, "EndDate"));
-          return { r, days: end ? daysUntil(end) : undefined };
+          return { r, days: end ? daysLeft(end, m.timeZone) : undefined };
         })
         .filter((x): x is { r: Rec; days: number } => x.days !== undefined && x.days <= withinDays)
         .filter((x) => {
@@ -314,50 +303,43 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
           return s !== undefined && !isTrial(pick(s, "BillingType"));
         })
         .sort((a, b) => a.days - b.days);
+      const seatModel = (s: Rec) => cspModel({ displayName: pick(s, "ProductDisplayName"), technicalName: pick(s, "productname") });
       const monthly = (x: { r: Rec }) => {
         const s = seatsById.get(str(pick(x.r, "AccountId")))!;
-        return isMonthlyTerm(pick(s, "BillingType"), isNce(pick(s, "ProductDisplayName")), bool(pick(s, "hasAdvancePayment")));
+        return hasMonthlyTerm(pick(s, "BillingType"), seatModel(s), bool(pick(s, "hasAdvancePayment")));
       };
       const monthlyCount = shortlist.filter(monthly).length;
       const listed = includeMonthlyTerms ? shortlist : shortlist.filter((x) => !monthly(x));
 
       const toCheck = listed.slice(0, maxSubscriptions);
       const errors: { accountId: string; error: string }[] = [];
-      const renewals = await mapLimit(toCheck, SUBSCRIPTION_CONCURRENCY, async ({ r }) => {
+      const fetched = await fetchSubscriptions(client, toCheck.map(({ r }) => Number(pick(r, "AccountId"))));
+      const renewals = toCheck.map(({ r }, i) => {
         const accountId = str(pick(r, "AccountId"));
         const s = seatsById.get(accountId)!;
-        const nce = isNce(pick(s, "ProductDisplayName"));
-        const advance = bool(pick(s, "hasAdvancePayment"));
-        // Fallback if GetSubscription fails: the report's own end date.
+        const full = fetched[i];
+        if (full instanceof Error) errors.push({ accountId, error: full.message });
+        // Fallback if GetSubscription fails: the report's own end date, with no end-date action.
         const reportEnd = parseDate(pick(r, "EndDate"));
-        let term: SubscriptionTerm = {
-          endDate: isoDay(reportEnd),
-          daysUntilEnd: reportEnd ? daysUntil(reportEnd) : null,
-          endDateAction: null,
-        };
-        try {
-          term = await getSubscriptionTerm(client, Number(accountId), !nce && !advance);
-        } catch (err) {
-          errors.push({ accountId, error: err instanceof Error ? err.message : String(err) });
-        }
-        const days = term.daysUntilEnd;
+        const reportDays = reportEnd ? daysLeft(reportEnd, m.timeZone) : null;
+        const term =
+          full && !(full instanceof Error)
+            ? termOf(describeSubscription(full, m.timeZone))
+            : { endDate: isoDay(reportEnd), daysLeft: reportDays, urgency: urgency(reportDays), storedEndDateAction: null, effectiveEndDateAction: null };
         return {
-          urgency: days === null ? "unknown" : days < 0 ? "past_end_date" : days <= 31 ? "urgent" : days <= 60 ? "soon" : "later",
-          daysUntilEnd: days,
-          endDate: term.endDate,
-          endDateAction: term.endDateAction,
+          ...term,
           scheduledTermination: scheduledIds.has(accountId),
           accountId: Number(accountId),
           reseller: pick(s, "reseller"),
           customer: pick(s, "companyName"),
           product: pick(s, "ProductDisplayName"),
-          model: nce ? "NCE" : "Legacy",
+          cspModel: seatModel(s),
           seats: pick(s, "seats"),
           billingType: pick(s, "BillingType"),
-          hasAdvancePayment: advance,
+          hasAdvancePayment: bool(pick(s, "hasAdvancePayment")),
         };
       });
-      renewals.sort((a, b) => (a.daysUntilEnd ?? 1e9) - (b.daysUntilEnd ?? 1e9));
+      renewals.sort((a, b) => (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9));
 
       return {
         summary: {
@@ -369,11 +351,11 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
           urgent: renewals.filter((x) => x.urgency === "urgent").length,
           soon: renewals.filter((x) => x.urgency === "soon").length,
           pastEndDate: renewals.filter((x) => x.urgency === "past_end_date").length,
-          willTerminate: renewals.filter((x) => x.scheduledTermination || /terminate/i.test(str(x.endDateAction))).length,
+          willTerminate: renewals.filter((x) => x.scheduledTermination || /terminate/i.test(str(x.effectiveEndDateAction))).length,
         },
         notes: [
-          "Model is NCE when the product name contains '(NCE)', otherwise Legacy.",
-          "Legacy monthly (no advance payment) subscriptions always renew; for others the action comes from the subscription.",
+          "CSP model is NCE when the product name contains '(NCE)', otherwise Legacy.",
+          "Legacy monthly subscriptions always renew (effectiveEndDateAction); for others it is the stored end-date action.",
           ...(includeMonthlyTerms
             ? []
             : [`${monthlyCount} monthly-term subscriptions in the window are left out (they renew every month); set includeMonthlyTerms to list them.`]),
@@ -397,24 +379,25 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     input: {
       maxSubscriptions: z.number().int().min(1).max(1000).optional().describe("Cap on GetSubscription calls (default 150)."),
     },
-    run: async ({ maxSubscriptions = 150 }, client) => {
+    run: async ({ maxSubscriptions = 150 }, client, m) => {
       const seats = await runReport(client, "MSCSPSeats");
-      const trials = seats.filter((r) => isTrial(pick(r, "BillingType")) && isNce(pick(r, "ProductDisplayName")));
+      const trials = seats.filter(
+        (r) => isTrial(pick(r, "BillingType")) && cspModel({ displayName: pick(r, "ProductDisplayName") }) === "NCE",
+      );
       const toCheck = trials.slice(0, maxSubscriptions);
       const errors: { accountId: string; error: string }[] = [];
-      const items = await mapLimit(toCheck, SUBSCRIPTION_CONCURRENCY, async (r) => {
+      const fetched = await fetchSubscriptions(client, toCheck.map((r) => Number(pick(r, "accountId"))));
+      const items = toCheck.map((r, i) => {
         const accountId = str(pick(r, "accountId"));
-        let term: SubscriptionTerm = { endDate: null, daysUntilEnd: null, endDateAction: null };
-        try {
-          term = await getSubscriptionTerm(client, Number(accountId), false);
-        } catch (err) {
-          errors.push({ accountId, error: err instanceof Error ? err.message : String(err) });
-        }
+        const full = fetched[i];
+        if (full instanceof Error) errors.push({ accountId, error: full.message });
+        const view = full && !(full instanceof Error) ? describeSubscription(full, m.timeZone) : undefined;
+        const action = view?.effectiveEndDateAction ?? null;
         return {
-          willConvertToPaid: /renew/i.test(str(term.endDateAction)),
-          endDateAction: term.endDateAction,
-          trialEndDate: term.endDate,
-          daysLeft: term.daysUntilEnd,
+          willConvertToPaid: /renew/i.test(str(action)),
+          effectiveEndDateAction: action,
+          trialEndDate: view?.endDate ?? null,
+          daysLeft: view?.daysLeft ?? null,
           accountId: Number(accountId),
           reseller: pick(r, "reseller"),
           customer: pick(r, "companyName"),
@@ -475,7 +458,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
           resellerCountry: pick(r, "Country"),
           customer: pick(r, "CompanyName"),
           product: pick(r, "ProductDisplayName"),
-          model: isNce(pick(r, "ProductDisplayName")) ? "NCE" : "Legacy",
+          cspModel: cspModel({ displayName: pick(r, "ProductDisplayName") }),
           billingType: pick(r, "BillingType"),
           accountId: pick(r, "AccountID"),
         }))
