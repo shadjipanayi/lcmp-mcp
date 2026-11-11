@@ -2,25 +2,24 @@
  * Support lookups, one country marketplace per call: find an account, summarise a customer, explain a subscription,
  * and pull a customer's invoice lines. All read-only.
  *
- * Account hierarchy per country marketplace: distributor root (the API user's own company)
- * -> resellers (GetCompanies(root)) -> customer companies (GetCompanies(reseller)) -> subscriptions / users.
+ * Accounts (root -> resellers -> customers, lookups, name search) come from the marketplace's Accounts module,
+ * subscription facts from the Subscription module, invoices from the marketplace's Invoices module.
  * Invoices are issued to resellers; each charge line names the end customer and the subscription AccountId.
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { accountSummary, first } from "../accounts.js";
 import type { LcmpPort, Workload } from "../client.js";
-import { type MarketplaceRegistry, NotFoundError } from "../marketplaces.js";
+import { lookup } from "../errors.js";
+import type { InvoicePeriod } from "../invoices.js";
+import type { MarketplaceRegistry } from "../marketplaces.js";
 import { type Rec, str } from "../reports.js";
 import { type SubscriptionView, describeSubscription, fetchSubscriptions } from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
 
-const DIRECTORY_TTL_MS = 6 * 60 * 60 * 1000;
 const MAX_MATCHES = 25;
 /** Active subscriptions fetched one by one for their end dates in get_customer_overview. */
 const MAX_DETAILED_SUBSCRIPTIONS = 50;
-
-const first = (data: unknown): Rec | undefined =>
-  Array.isArray(data) ? (data[0] as Rec | undefined) : data && typeof data === "object" ? (data as Rec) : undefined;
 
 /** Calls an operation and returns undefined instead of throwing (for optional sections and probing). */
 async function tryCall(client: LcmpPort, op: string, body: Rec, workload?: Workload): Promise<unknown> {
@@ -29,168 +28,6 @@ async function tryCall(client: LcmpPort, op: string, body: Rec, workload?: Workl
   } catch {
     return undefined;
   }
-}
-
-/**
- * API errors that mean "this account isn't in this marketplace", as opposed to timeouts or outages. Observed on the
- * live API: unknown IDs give "Invalid account id"; accounts of another country give "Not enough permissions to get
- * account details"; subscriptions outside the user's tree give "Not enough permissions to execute ... for the AccountId".
- */
-const NOT_FOUND =
-  /invalid account|not found|does not exist|not enough permissions to get account details|not enough permissions to execute .* for the accountid/i;
-
-const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
-
-/** Runs a lookup; turns the API's "not in this marketplace" errors into NotFoundError, rethrows anything else. */
-async function lookup<T>(p: Promise<T>): Promise<T> {
-  try {
-    return await p;
-  } catch (err) {
-    if (NOT_FOUND.test(message(err))) throw new NotFoundError(message(err));
-    throw err;
-  }
-}
-
-/**
- * Gets a company or reseller account by ID. Throws NotFoundError when the account isn't in this marketplace; any
- * other failure (timeout, outage) is thrown as is, so the user sees the real cause.
- */
-async function getAccount(client: LcmpPort, accountId: number): Promise<Rec> {
-  try {
-    const company = first(await lookup(client.call("GetCompany", { accountId })));
-    if (company?.AccountId !== undefined) return company;
-  } catch (err) {
-    // Only try GetReseller when GetCompany says "not here"; on a timeout, don't make the user wait twice.
-    if (!(err instanceof NotFoundError)) throw err;
-  }
-  const reseller = first(await lookup(client.call("GetReseller", { accountId })));
-  if (reseller?.AccountId !== undefined) return reseller;
-  throw new NotFoundError();
-}
-
-/** For optional lookups (a parent reseller, a subscription's customer): undefined instead of NotFoundError. */
-async function optional<T>(p: Promise<T>): Promise<T | undefined> {
-  try {
-    return await p;
-  } catch (err) {
-    if (err instanceof NotFoundError) return undefined;
-    throw err;
-  }
-}
-
-/**
- * Finds one account by VAT ID. Several accounts can share a VAT ID (a short VAT ID returned 80 on CYMA), so more
- * than one match is an error that lists them, instead of silently picking the first.
- */
-async function accountByVat(client: LcmpPort, vatId: string): Promise<Rec> {
-  for (const op of ["GetCompanyByVatId", "GetResellerByVatId"]) {
-    const result = await optional(lookup(client.call(op, { vatId })));
-    const list = (Array.isArray(result) ? result : result ? [result] : []) as Rec[];
-    if (list.length === 1) return list[0];
-    if (list.length > 1) {
-      const shown = list.slice(0, 10).map((a) => `${a.AccountId} ${a.CompanyName}`).join("; ");
-      throw new Error(`${list.length} accounts have VAT ID "${vatId}": ${shown}${list.length > 10 ? "; ..." : ""}. Ask which one, then use its accountId.`);
-    }
-  }
-  throw new NotFoundError(`No account with VAT ID "${vatId}".`);
-}
-
-function accountSummary(a: Rec) {
-  return {
-    accountId: a.AccountId,
-    type: a.AccountType ?? null,
-    name: a.CompanyName,
-    vatId: a.VATID ?? null,
-    country: a.Country ?? null,
-    state: a.AccountState ?? null,
-    currency: a.Currency ?? null,
-    parentAccountId: a.ParentAccountId ?? null,
-    email: a.Email ?? null,
-    billingStartDate: a.BillingStartDate ?? null,
-  };
-}
-
-interface Directory {
-  at: number;
-  rootId: number;
-  resellers: Rec[];
-  customers?: Rec[];
-  /** Resellers whose customer list could not be loaded, so name search may miss their customers. */
-  failedResellers?: number;
-}
-const directories = new Map<string, Directory>();
-/** In-flight builds, so concurrent searches in one marketplace share a single build instead of each crawling. */
-const resellerLoads = new Map<string, Promise<Directory>>();
-const customerLoads = new Map<string, Promise<void>>();
-
-function shared<T>(map: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
-  let p = map.get(key);
-  if (!p) {
-    p = load().finally(() => map.delete(key));
-    map.set(key, p);
-  }
-  return p;
-}
-
-/**
- * Cached list of a marketplace's resellers (and, on demand, all their customers). Building the customer list
- * makes one GetCompanies call per reseller, so it is slow the first time; it is then cached for 6 hours.
- */
-async function getDirectory(code: string, client: LcmpPort, withCustomers: boolean): Promise<Directory> {
-  let dir = directories.get(code);
-  if (!dir || Date.now() - dir.at > DIRECTORY_TTL_MS) {
-    dir = await shared(resellerLoads, code, async () => {
-      const root = first(await client.call("GetCompany", {}));
-      const rootId = Number(root?.AccountId);
-      if (!rootId) throw new Error("Could not determine the marketplace root account.");
-      const resellers = (await client.call("GetCompanies", { parentAccountId: rootId }, "heavy")) as Rec[] | null;
-      const fresh: Directory = { at: Date.now(), rootId, resellers: Array.isArray(resellers) ? resellers : [] };
-      directories.set(code, fresh);
-      return fresh;
-    });
-  }
-  // A crawl with failed resellers is used once but not kept, so the next search tries those resellers again.
-  if (withCustomers && (!dir.customers || dir.failedResellers)) {
-    const target = dir;
-    await shared(customerLoads, code, async () => {
-      let failed = 0;
-      // One call per reseller: the client's bulk lane caps how many run at once, so quick lookups stay responsive.
-      const lists = await Promise.all(target.resellers.map(async (r) => {
-        const companies = (await tryCall(client, "GetCompanies", { parentAccountId: r.AccountId }, "bulk")) as Rec[] | undefined;
-        if (companies === undefined) failed++;
-        return (Array.isArray(companies) ? companies : []).map((c) => ({
-          ...c,
-          _resellerName: r.CompanyName,
-          _resellerAccountId: r.AccountId,
-        }));
-      }));
-      target.customers = lists.flat();
-      target.failedResellers = failed;
-    });
-  }
-  return dir;
-}
-
-/**
- * Invoice downloads cover the whole marketplace and take minutes (~3 min for CYMA's last closed month), so they are
- * cached: a closed month doesn't change (6 h), the preview month does (15 min). Concurrent requests share a download.
- */
-const invoiceCache = new Map<string, { at: number; ttl: number; data: Rec[] }>();
-const invoiceLoads = new Map<string, Promise<Rec[]>>();
-
-async function getInvoices(code: string, client: LcmpPort, op: string, body: Rec): Promise<{ data: Rec[]; cachedAt: number }> {
-  const key = `${code}|${op}|${JSON.stringify(body)}`;
-  const hit = invoiceCache.get(key);
-  if (hit && Date.now() - hit.at < hit.ttl) return { data: hit.data, cachedAt: hit.at };
-  const data = await shared(invoiceLoads, key, async () => {
-    const result = (await client.call(op, body, "heavy")) as Rec[] | null;
-    const list = Array.isArray(result) ? result : [];
-    // Each entry is a whole country's month of invoices: drop expired ones so memory doesn't keep growing.
-    for (const [k, v] of invoiceCache) if (Date.now() - v.at >= v.ttl) invoiceCache.delete(k);
-    invoiceCache.set(key, { at: Date.now(), ttl: op === "GetPreviewInvoices" ? 15 * 60_000 : DIRECTORY_TTL_MS, data: list });
-    return list;
-  });
-  return { data, cachedAt: invoiceCache.get(key)?.at ?? Date.now() };
 }
 
 const round2 = (n: number) => Math.round(n * 100) / 100;
@@ -235,37 +72,13 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
         .optional()
         .describe("Also search customer companies by name, not just resellers (default true)."),
     },
-    run: async ({ query, includeCustomers = true }, client, m) => {
-      const q = query.trim();
-      // All digits can be an account ID or a VAT ID (e.g. Greek VAT numbers): try the ID first, then search on.
-      if (/^\d+$/.test(q)) {
-        const a = await optional(getAccount(client, Number(q)));
-        if (a) return { matches: [accountSummary(a)] };
-      }
-      const matches = new Map<string, Rec>();
-      const add = (a: Rec | undefined, extra: Rec = {}) => {
-        if (a?.AccountId !== undefined) matches.set(str(a.AccountId), { ...accountSummary(a), ...extra });
-      };
-      // Exact VAT lookups are cheap, so always try them.
-      add(first(await tryCall(client, "GetResellerByVatId", { vatId: q })));
-      add(first(await tryCall(client, "GetCompanyByVatId", { vatId: q })));
-
-      const dir = await getDirectory(m.code, client, includeCustomers);
-      const nq = norm(q);
-      // Names match on substring; VAT IDs only exactly (short or placeholder VATs are shared by many accounts).
-      const hit = (a: Rec) => norm(a.CompanyName).includes(nq) || (!!norm(a.VATID) && norm(a.VATID) === nq);
-      for (const r of dir.resellers) if (hit(r)) add(r, { type: r.AccountType ?? "Reseller" });
-      for (const c of dir.customers ?? [])
-        if (hit(c))
-          add(c, { type: c.AccountType ?? "Company", resellerName: c._resellerName, resellerAccountId: c._resellerAccountId });
-      const list = [...matches.values()];
-      if (!list.length) return undefined;
+    run: async ({ query, includeCustomers = true }, _client, m) => {
+      const { matches, warnings } = await m.accounts.search(query, includeCustomers);
+      if (!matches.length) return undefined;
       return {
-        matches: list.slice(0, MAX_MATCHES),
-        ...(list.length > MAX_MATCHES ? { note: `${list.length} matches; showing the first ${MAX_MATCHES}. Refine the query.` } : {}),
-        ...(dir.failedResellers
-          ? { warning: `Customer lists of ${dir.failedResellers} resellers could not be loaded; some customers may be missing.` }
-          : {}),
+        matches: matches.slice(0, MAX_MATCHES),
+        ...(matches.length > MAX_MATCHES ? { note: `${matches.length} matches; showing the first ${MAX_MATCHES}. Refine the query.` } : {}),
+        ...(warnings.length ? { warnings } : {}),
       };
     },
   });
@@ -276,17 +89,18 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
     description:
       "One-call summary of a customer company or reseller: account details, its reseller, credit limit, users and " +
       "subscriptions (service, CSP model NCE/Legacy, state, provisioning status/errors, end date, days left, urgency and " +
-      "end-date action). For a reseller, lists its customers instead of subscriptions. " +
-      "Urgency: 'past_end_date' (<0 days left), 'urgent' (0-31), 'soon' (32-60), 'later'.",
+      "end-date action). For a reseller, lists its customers instead of subscriptions (for the marketplace root, its " +
+      "resellers). Urgency: 'past_end_date' (<0 days left), 'urgent' (0-31), 'soon' (32-60), 'later'.",
     input: {
       accountId: z.number().int().optional().describe("Company or reseller Account ID."),
       vatId: z.string().optional().describe("VAT ID, if the Account ID is not known."),
     },
     run: async ({ accountId, vatId }, client, m) => {
       if (accountId === undefined && !vatId) throw new Error("Give accountId or vatId (use find_account to search by name).");
-      const account = accountId !== undefined ? await getAccount(client, accountId) : await accountByVat(client, vatId!);
+      const account = accountId !== undefined ? await m.accounts.get(accountId) : await m.accounts.byVat(vatId!);
       const id = Number(account.AccountId);
-      const isReseller = str(account.AccountType).toLowerCase() === "reseller";
+      const role = await m.accounts.role(account);
+      const hasChildren = role !== "customer";
       const errors: string[] = [];
       const section = async <T>(label: string, p: Promise<T>): Promise<T | undefined> => {
         try {
@@ -297,12 +111,12 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
         }
       };
 
-      const [parent, credit, users, subs, customers] = await Promise.all([
-        !isReseller && account.ParentAccountId ? optional(getAccount(client, Number(account.ParentAccountId))) : undefined,
+      const [parent, credit, users, subs, children] = await Promise.all([
+        m.accounts.resellerOf(account),
         section("credit limit", client.call("GetCreditLimit", { accountId: id })),
         section("users", client.call("GetUsers", { companyAccountId: id })),
-        isReseller ? undefined : section("subscriptions", client.call("GetSubscriptions", { parentAccountId: id }, "heavy")),
-        isReseller ? section("customers", client.call("GetCompanies", { parentAccountId: id }, "heavy")) : undefined,
+        hasChildren ? undefined : section("subscriptions", client.call("GetSubscriptions", { parentAccountId: id }, "heavy")),
+        hasChildren ? section(role === "root" ? "resellers" : "customers", client.call("GetCompanies", { parentAccountId: id }, "heavy")) : undefined,
       ]);
 
       const userList = (Array.isArray(users) ? (users as Rec[]) : []).map((u) => ({
@@ -324,7 +138,7 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       });
       const subList = listed.map((s) => subscriptionRow(describeSubscription(detailed.get(str(s.AccountId)) ?? s, m.timeZone)));
       subList.sort((a, b) => (a.state === b.state ? (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9) : a.state === "Active" ? -1 : 1));
-      const customerList = (Array.isArray(customers) ? (customers as Rec[]) : []).map((c) => ({
+      const childList = (Array.isArray(children) ? (children as Rec[]) : []).map((c) => ({
         accountId: c.AccountId,
         name: c.CompanyName,
         vatId: c.VATID ?? null,
@@ -332,22 +146,24 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       }));
 
       return {
-        account: accountSummary(account),
+        account: { ...accountSummary(account), role },
         ...(parent ? { reseller: { accountId: parent.AccountId, name: parent.CompanyName, vatId: parent.VATID ?? null } } : {}),
         creditLimit: credit ?? null,
-        ...(isReseller
-          ? { customerCount: customerList.length, customers: customerList.slice(0, 200) }
-          : {
-              subscriptionSummary: {
-                total: subList.length,
-                active: subList.filter((s) => s.state === "Active").length,
-                withErrors: subList.filter((s) => s.errorDetails).length,
-                activeUrgent: subList.filter((s) => s.state === "Active" && s.urgency === "urgent").length,
-                activePastEndDate: subList.filter((s) => s.state === "Active" && s.urgency === "past_end_date").length,
-                scheduledForTermination: subList.filter((s) => s.scheduledTerminationDate).length,
-              },
-              subscriptions: subList,
-            }),
+        ...(role === "root"
+          ? { resellerCount: childList.length, resellers: childList.slice(0, 200) }
+          : role === "reseller"
+            ? { customerCount: childList.length, customers: childList.slice(0, 200) }
+            : {
+                subscriptionSummary: {
+                  total: subList.length,
+                  active: subList.filter((s) => s.state === "Active").length,
+                  withErrors: subList.filter((s) => s.errorDetails).length,
+                  activeUrgent: subList.filter((s) => s.state === "Active" && s.urgency === "urgent").length,
+                  activePastEndDate: subList.filter((s) => s.state === "Active" && s.urgency === "past_end_date").length,
+                  scheduledForTermination: subList.filter((s) => s.scheduledTerminationDate).length,
+                },
+                subscriptions: subList,
+              }),
         userCount: userList.length,
         users: userList.slice(0, 100),
         ...(errors.length ? { errors } : {}),
@@ -370,8 +186,8 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
         (await tryCall(client, "GetSubscriptionWithAddons", { accountId })) ?? (await lookup(client.call("GetSubscription", { accountId }))),
       );
       if (!sub?.AccountId) return undefined;
-      const company = sub.CompanyAccountId ? await optional(getAccount(client, Number(sub.CompanyAccountId))) : undefined;
-      const reseller = company?.ParentAccountId ? await optional(getAccount(client, Number(company.ParentAccountId))) : undefined;
+      const company = sub.CompanyAccountId ? await m.accounts.find(Number(sub.CompanyAccountId)) : undefined;
+      const reseller = company ? await m.accounts.resellerOf(company) : undefined;
       const fields = Array.isArray(sub.Fields) ? Object.fromEntries((sub.Fields as Rec[]).map((f) => [str(f.Name), f.Value])) : {};
       const { notes: viewNotes, ...view } = describeSubscription(sub, m.timeZone);
 
@@ -421,15 +237,11 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       maxLines: z.number().int().min(0).max(1000).optional().describe("Individual lines to include (default 100; totals always cover all lines)."),
     },
     run: async ({ accountId, year, month, preview, endCustomer, maxLines = 100 }, client, m) => {
-      const account = await getAccount(client, accountId);
+      const account = await m.accounts.get(accountId);
       if ((year === undefined) !== (month === undefined)) throw new Error("Give both year and month, or neither.");
-      const isReseller = str(account.AccountType).toLowerCase() === "reseller";
-      const [op, body] = preview
-        ? ["GetPreviewInvoices", {}]
-        : year !== undefined
-          ? ["GetLatestInvoicesForPeriod", { year, month }]
-          : ["GetLatestInvoices", {}];
-      const { data: all, cachedAt } = await getInvoices(m.code, client, op, body);
+      const isReseller = (await m.accounts.role(account)) !== "customer";
+      const period: InvoicePeriod = preview ? { preview: true } : year !== undefined ? { year, month: month! } : {};
+      const { source, data: all, cachedAt } = await m.invoices.get(period);
 
       let subscriptionIds = new Set<string>();
       if (!isReseller) {
@@ -468,7 +280,7 @@ export function registerSupportTools(server: McpServer, registry: MarketplaceReg
       lines.sort((a, b) => (Number(b.salesPrice) || 0) - (Number(a.salesPrice) || 0));
       return {
         account: { accountId, name: account.CompanyName, type: account.AccountType ?? null },
-        source: op,
+        source,
         dataAsOf: new Date(cachedAt).toISOString(),
         invoicesScanned: all.length,
         lineCount: lines.length,
