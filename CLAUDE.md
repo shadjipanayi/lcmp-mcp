@@ -24,7 +24,9 @@ A read-only MCP server (stdio for Claude Code/Desktop, Streamable HTTP for Azure
 
 There is no linter. To exercise a tool against the mock API, add an entry to the `calls` array in `scripts/smoke-test.mjs`, or use the Inspector.
 
-Config is via env vars: `LCMP_BASE_URL`, `LCMP_MARKETPLACES` (codes) and `LCMP_<CODE>_USERNAME`/`_PASSWORD` per marketplace, or `LCMP_USERNAME`/`LCMP_PASSWORD` for a single marketplace; see `.env.example`. API users must not have MFA enabled.
+Config is via env vars: `LCMP_BASE_URL`, `LCMP_MARKETPLACES` (codes) and `LCMP_<CODE>_USERNAME`/`_PASSWORD` per marketplace, or `LCMP_USERNAME`/`LCMP_PASSWORD` for a single marketplace; see `.env.example`. API users must not have MFA enabled. `dev`, `start` and `inspect` load a git-ignored `.env` (`--env-file-if-exists`). HTTP mode adds `HOST`/`PORT` (default `127.0.0.1:3000`, `0.0.0.0` in the Docker image), `ENTRA_TENANT_ID`, `ENTRA_AUDIENCE` and `ENTRA_REQUIRED_ROLE`; the Azure deployment steps are in `docs/deploy-azure.md`.
+
+When testing against the live API, avoid heavy reports during the platform's billing run (00:00-02:50 UTC) and Azure sync (05:30-06:30 UTC): they time out.
 
 ## Architecture
 
@@ -46,6 +48,7 @@ Config is via env vars: `LCMP_BASE_URL`, `LCMP_MARKETPLACES` (codes) and `LCMP_<
 - stdout is the MCP transport: never `console.log` in server code; log to stderr (`console.error`).
 - ESM with `NodeNext` resolution: relative imports must use the `.js` extension.
 - All tools are read-only (`readOnlyHint: true`); don't add write operations.
+- `.claude/skills/` is vendored from `mattpocock/skills` and pinned in `skills-lock.json`. Update it with `npx skills update` rather than editing the files by hand.
 
 ## Agent skills
 
