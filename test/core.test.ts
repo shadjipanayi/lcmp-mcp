@@ -7,6 +7,8 @@ import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
 import { createEntraVerifier } from "../src/auth.js";
 import type { LcmpPort } from "../src/client.js";
 import { MarketplaceRegistry, createMarketplace } from "../src/marketplaces.js";
+import { runReport, settle } from "../src/reports.js";
+import { seatRow } from "../src/seats.js";
 import { createServer } from "../src/server.js";
 import { describeSubscription } from "../src/subscription.js";
 import { redactSecrets } from "../src/tools/helpers.js";
@@ -112,6 +114,45 @@ describe("Subscription module", () => {
     assert.equal(at("2026-12-11T00:00:00"), "soon"); // 32 days
     assert.equal(at("2027-01-09T00:00:00"), "later"); // 61 days
     assert.equal(describeSubscription({ AccountId: 2 }, tz, now).urgency, null);
+  });
+});
+
+describe("reports", () => {
+  it("reads an MSCSPSeats row with its live column names", () => {
+    // Column names and casing as CYMA returns them ("companyname", "productname").
+    const row = seatRow({
+      accountId: 979775,
+      reseller: "PC. SYSTEMS SUPPORT LTD",
+      companyname: "Acme SA",
+      productname: "156469_ExchanOnlinePlan1_45103",
+      seats: "12",
+      hasAdvancePayment: false,
+      ProductDisplayName: "(NCE) Exchange Online (Plan 1)",
+      BillingType: "Monthly (with 1-month commitment) - P1M",
+    });
+    assert.deepEqual(
+      { id: row.accountId, customer: row.customer, seats: row.seats, model: row.cspModel, trial: row.trial, monthly: row.monthlyTerm },
+      { id: 979775, customer: "Acme SA", seats: 12, model: "NCE", trial: false, monthly: true },
+    );
+    const legacyPrepaid = seatRow({ accountId: 1, productname: "156469_X", ProductDisplayName: "Exchange", BillingType: "Annually prepaid", hasAdvancePayment: "True" });
+    assert.equal(legacyPrepaid.cspModel, "Legacy");
+    assert.equal(legacyPrepaid.monthlyTerm, false);
+  });
+
+  it("refuses blocked reports on every path, not just execute_report", async () => {
+    let called = false;
+    const client = { call: async () => ((called = true), { Columns: [], Rows: [] }) };
+    await assert.rejects(runReport(client, "Failed provisioning statistics"), /disabled/);
+    assert.equal(called, false);
+  });
+
+  it("settle keeps what worked and reports what failed", async () => {
+    const some = await settle({ a: Promise.resolve(1), b: Promise.reject(new Error("no permission")), c: undefined });
+    assert.deepEqual(some.values, { a: 1 });
+    assert.deepEqual(some.errors, ["b: no permission"]);
+    assert.equal(some.allFailed, false);
+    const none = await settle({ a: Promise.reject(new Error("x")) });
+    assert.equal(none.allFailed, true);
   });
 });
 
@@ -301,6 +342,31 @@ describe("support tools", () => {
     const some = JSON.parse((await call("find_account", { query: "acme", includeCustomers: false })).text).data;
     assert.equal(some.matches[0].name, "Acme Reseller");
     assert.match(some.warnings[0], /VAT ID lookup failed/);
+  });
+
+  it("review_nce_trials flags NCE trials still set to renew", async () => {
+    const columns = ["accountId", "reseller", "companyname", "productname", "seats", "hasAdvancePayment", "ProductDisplayName", "BillingType"];
+    const rows = [
+      [10, "R", "Acme", "156469_M365BP_1", 5, false, "(NCE) Microsoft 365 Business Premium", "Trial"],
+      [11, "R", "Beta", "156469_M365BP_1", 3, false, "(NCE) Microsoft 365 Business Premium", "TRIAL"],
+      [12, "R", "Gamma", "156469_M365BP_1", 9, true, "(NCE) Microsoft 365 Business Premium", "Prepaid (with 1-year commitment) - P1Y"],
+    ];
+    const call = await connect({
+      ExecuteReport: () => ({ Columns: columns.map((Name, CellIndex) => ({ Name, CellIndex })), Rows: rows.map((Cells) => ({ Cells })) }),
+      GetSubscription: (b) => ({
+        AccountId: b.accountId,
+        ServiceDisplayName: "(NCE) Microsoft 365 Business Premium",
+        AdvancePeriodEndAction: b.accountId === 10 ? "Renew" : "Terminate",
+        AdvancePeriodEndDate: "2026-12-01T00:00:00",
+      }),
+    });
+    const r = await call("review_nce_trials", {});
+    assert.equal(r.isError, false, r.text);
+    const data = JSON.parse(r.text).data;
+    assert.deepEqual(data.summary, { nceTrials: 2, checked: 2, setToRenew: 1 });
+    assert.equal(data.trials[0].accountId, 10);
+    assert.equal(data.trials[0].customer, "Acme");
+    assert.equal(data.trials[0].trialEndDate, "2026-12-01");
   });
 
   it("a timeout is reported as a timeout, not as not found", async () => {

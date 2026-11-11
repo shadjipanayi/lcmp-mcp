@@ -6,7 +6,6 @@
  */
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { LcmpPort } from "../client.js";
 import { PRODUCT_CODES } from "../knowledge.js";
 import type { MarketplaceRegistry } from "../marketplaces.js";
 import {
@@ -17,22 +16,21 @@ import {
   parseDate,
   pick,
   runReport,
+  settle,
   str,
   todayIn,
 } from "../reports.js";
+import { readSeats } from "../seats.js";
 import {
   type SubscriptionView,
   cspModel,
   daysLeft,
   describeSubscription,
   fetchSubscriptions,
-  hasMonthlyTerm,
   isTrial,
   urgency,
 } from "../subscription.js";
 import { registerCompositeTool } from "./helpers.js";
-
-const bool = (v: unknown) => v === true || /^true$/i.test(str(v));
 
 /** The parts of the shared subscription view the review tools report. */
 function termOf(view: SubscriptionView) {
@@ -83,16 +81,13 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     run: async (_args, client) => {
       // The runbook's 'Failed provisioning requests' report isn't granted to the MCP users; 'Failed provisioning
       // details' is (columns Target, ProductName, Action, CSP, ErrorDetails). The halves run independently.
-      const [waitingResult, failedResult] = await Promise.allSettled([
-        runReport(client, "Waiting provisioning requests"),
-        runReport(client, "Failed provisioning details"),
-      ]);
-      const errors: string[] = [];
-      if (waitingResult.status === "rejected") errors.push(`waiting requests: ${String(waitingResult.reason?.message ?? waitingResult.reason)}`);
-      if (failedResult.status === "rejected") errors.push(`failed requests: ${String(failedResult.reason?.message ?? failedResult.reason)}`);
-      if (errors.length === 2) throw new Error(errors.join(" | "));
-      const waiting = waitingResult.status === "fulfilled" ? waitingResult.value : undefined;
-      const failed = failedResult.status === "fulfilled" ? failedResult.value : undefined;
+      const { values, errors, allFailed } = await settle({
+        "waiting requests": runReport(client, "Waiting provisioning requests"),
+        "failed requests": runReport(client, "Failed provisioning details"),
+      });
+      if (allFailed) throw new Error(errors.join(" | "));
+      const waiting = values["waiting requests"];
+      const failed = values["failed requests"];
 
       const waitingItems = (waiting ?? []).map((r) => {
         const created = parseDate(pick(r, "createdate"));
@@ -176,16 +171,13 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     },
     run: async ({ recentCompletedOrders = 20 }, client) => {
       // The two halves need different permissions; report a failure in one without losing the other.
-      const [limitsResult, ordersResult] = await Promise.allSettled([
-        runReport(client, "Credit Limits"),
-        client.call("ListCreditCheckOrdersForApproval", {}, "heavy") as Promise<Rec[] | null>,
-      ]);
-      const errors: string[] = [];
-      if (limitsResult.status === "rejected") errors.push(`credit limits: ${String(limitsResult.reason?.message ?? limitsResult.reason)}`);
-      if (ordersResult.status === "rejected") errors.push(`credit orders: ${String(ordersResult.reason?.message ?? ordersResult.reason)}`);
-      if (errors.length === 2) throw new Error(errors.join(" | "));
-      const limits = limitsResult.status === "fulfilled" ? limitsResult.value : undefined;
-      const orders = ordersResult.status === "fulfilled" ? ordersResult.value : undefined;
+      const { values, errors, allFailed } = await settle({
+        "credit limits": runReport(client, "Credit Limits"),
+        "credit orders": client.call("ListCreditCheckOrdersForApproval", {}, "heavy") as Promise<Rec[] | null>,
+      });
+      if (allFailed) throw new Error(errors.join(" | "));
+      const limits = values["credit limits"];
+      const orders = values["credit orders"];
       const resellers = (limits ?? []).map((r) => ({
         rootOrganization: pick(r, "Root Organization"),
         accountId: pick(r, "AccountId"),
@@ -276,11 +268,11 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
     run: async ({ withinDays = 60, maxSubscriptions = 150, includeMonthlyTerms = false }, client, m) => {
       const [priceProtected, seats, scheduled] = await Promise.all([
         runReport(client, "Price Protected Services"),
-        runReport(client, "MSCSPSeats"),
+        readSeats(client),
         runReport(client, "Scheduled Terminations"),
       ]);
       const scheduledIds = new Set(scheduled.map((r) => str(pick(r, "Subscription account Id"))));
-      const seatsById = new Map(seats.map((r) => [str(pick(r, "accountId")), r]));
+      const seatsById = new Map(seats.map((s) => [String(s.accountId), s]));
 
       // The report has one row per priceable item, so a subscription can appear several times: keep its earliest end.
       const earliest = new Map<string, Rec>();
@@ -298,14 +290,10 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
         .filter((x): x is { r: Rec; days: number } => x.days !== undefined && x.days <= withinDays)
         .filter((x) => {
           const s = seatsById.get(str(pick(x.r, "AccountId")));
-          return s !== undefined && !isTrial(pick(s, "BillingType"));
+          return s !== undefined && !s.trial;
         })
         .sort((a, b) => a.days - b.days);
-      const seatModel = (s: Rec) => cspModel({ displayName: pick(s, "ProductDisplayName"), technicalName: pick(s, "productname") });
-      const monthly = (x: { r: Rec }) => {
-        const s = seatsById.get(str(pick(x.r, "AccountId")))!;
-        return hasMonthlyTerm(pick(s, "BillingType"), seatModel(s), bool(pick(s, "hasAdvancePayment")));
-      };
+      const monthly = (x: { r: Rec }) => seatsById.get(str(pick(x.r, "AccountId")))!.monthlyTerm;
       const monthlyCount = shortlist.filter(monthly).length;
       const listed = includeMonthlyTerms ? shortlist : shortlist.filter((x) => !monthly(x));
 
@@ -327,14 +315,14 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
         return {
           ...term,
           scheduledTermination: scheduledIds.has(accountId),
-          accountId: Number(accountId),
-          reseller: pick(s, "reseller"),
-          customer: pick(s, "companyName"),
-          product: pick(s, "ProductDisplayName"),
-          cspModel: seatModel(s),
-          seats: pick(s, "seats"),
-          billingType: pick(s, "BillingType"),
-          hasAdvancePayment: bool(pick(s, "hasAdvancePayment")),
+          accountId: s.accountId,
+          reseller: s.reseller,
+          customer: s.customer,
+          product: s.product,
+          cspModel: s.cspModel,
+          seats: s.seats,
+          billingType: s.billingType,
+          hasAdvancePayment: s.hasAdvancePayment,
         };
       });
       renewals.sort((a, b) => (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9));
@@ -378,17 +366,13 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
       maxSubscriptions: z.number().int().min(1).max(1000).optional().describe("Cap on GetSubscription calls (default 150)."),
     },
     run: async ({ maxSubscriptions = 150 }, client, m) => {
-      const seats = await runReport(client, "MSCSPSeats");
-      const trials = seats.filter(
-        (r) => isTrial(pick(r, "BillingType")) && cspModel({ displayName: pick(r, "ProductDisplayName") }) === "NCE",
-      );
+      const trials = (await readSeats(client)).filter((s) => s.trial && s.cspModel === "NCE");
       const toCheck = trials.slice(0, maxSubscriptions);
       const errors: { accountId: string; error: string }[] = [];
-      const fetched = await fetchSubscriptions(client, toCheck.map((r) => Number(pick(r, "accountId"))));
-      const items = toCheck.map((r, i) => {
-        const accountId = str(pick(r, "accountId"));
+      const fetched = await fetchSubscriptions(client, toCheck.map((s) => s.accountId));
+      const items = toCheck.map((s, i) => {
         const full = fetched[i];
-        if (full instanceof Error) errors.push({ accountId, error: full.message });
+        if (full instanceof Error) errors.push({ accountId: String(s.accountId), error: full.message });
         const view = full && !(full instanceof Error) ? describeSubscription(full, m.timeZone) : undefined;
         const action = view?.effectiveEndDateAction ?? null;
         return {
@@ -396,11 +380,11 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
           effectiveEndDateAction: action,
           trialEndDate: view?.endDate ?? null,
           daysLeft: view?.daysLeft ?? null,
-          accountId: Number(accountId),
-          reseller: pick(r, "reseller"),
-          customer: pick(r, "companyName"),
-          product: pick(r, "ProductDisplayName"),
-          seats: pick(r, "seats"),
+          accountId: s.accountId,
+          reseller: s.reseller,
+          customer: s.customer,
+          product: s.product,
+          seats: s.seats,
         };
       });
       items.sort((a, b) => Number(b.willConvertToPaid) - Number(a.willConvertToPaid) || (a.daysLeft ?? 1e9) - (b.daysLeft ?? 1e9));
