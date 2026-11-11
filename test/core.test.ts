@@ -7,8 +7,8 @@ import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair } from "jose";
 import { createEntraVerifier } from "../src/auth.js";
 import type { LcmpClient } from "../src/client.js";
 import { MarketplaceRegistry } from "../src/marketplaces.js";
-import { daysUntil, isoDay, parseDate, subscriptionTerm, todayIn } from "../src/reports.js";
 import { createServer } from "../src/server.js";
+import { describeSubscription } from "../src/subscription.js";
 import { redactSecrets } from "../src/tools/helpers.js";
 
 describe("redactSecrets", () => {
@@ -30,33 +30,88 @@ describe("redactSecrets", () => {
   });
 });
 
-describe("dates", () => {
+describe("Subscription module", () => {
   const now = new Date("2026-11-09T12:00:00Z");
+  const tz = "Europe/Athens";
+  // Shapes as GetSubscription returns them on CYMA.
+  const legacyMonthly = {
+    AccountId: 1,
+    AccountState: "Active",
+    ServiceName: "156469_LGCMExchangeOnlinePlan1GOV_14349",
+    ServiceDisplayName: "Exchange Online Plan 1 (Government Pricing)",
+    PriceProtectionEndDate: "2026-11-30T00:00:00",
+    Fields: [
+      { Name: "BillingType", Value: "Monthly" },
+      { Name: "Subscriptionenddate", Value: "2021-05-27T00:00:00Z" },
+    ],
+  };
+  const legacyPrepaid = {
+    ...legacyMonthly,
+    AdvancePeriodEndAction: "Terminate",
+    AdvancePeriodEndDate: "2027-04-04T05:48:46.007",
+    Fields: [{ Name: "BillingType", Value: "Annually prepaid" }],
+  };
 
-  it("reads the API's zone-less dates as calendar dates", () => {
-    const d = parseDate("2026-11-10T00:00:00")!;
-    assert.equal(isoDay(d), "2026-11-10");
-    assert.equal(daysUntil(d, now), 1);
+  it("Legacy monthly subscriptions effectively renew, though no action is stored", () => {
+    const v = describeSubscription(legacyMonthly, tz, now);
+    assert.equal(v.cspModel, "Legacy");
+    assert.equal(v.legacyMonthly, true);
+    assert.equal(v.storedEndDateAction, null);
+    assert.equal(v.effectiveEndDateAction, "Renew");
+    assert.match(v.notes.join(" "), /renew every month/);
   });
 
-  it("uses the marketplace's local date for today", () => {
-    // 23:30 UTC on the 9th is already the 10th in Cyprus.
-    assert.equal(todayIn("Asia/Nicosia", new Date("2026-11-09T23:30:00Z")), "2026-11-10");
-    assert.equal(todayIn("UTC", new Date("2026-11-09T23:30:00Z")), "2026-11-09");
+  it("Legacy prepaid and NCE subscriptions keep their stored end-date action", () => {
+    const prepaid = describeSubscription(legacyPrepaid, tz, now);
+    assert.equal(prepaid.legacyMonthly, false);
+    assert.equal(prepaid.effectiveEndDateAction, "Terminate");
+    const nce = describeSubscription(
+      { ...legacyPrepaid, ServiceDisplayName: "(NCE) Exchange Online (Plan 1)", Fields: [{ Name: "BillingType", Value: "Monthly (with 1-month commitment) - P1M" }] },
+      tz,
+      now,
+    );
+    assert.equal(nce.cspModel, "NCE");
+    assert.equal(nce.legacyMonthly, null);
+    assert.equal(nce.effectiveEndDateAction, "Terminate");
   });
 
-  it("ignores the Subscriptionenddatealignment field and falls back to ContractEndDate", () => {
-    const term = subscriptionTerm({
-      Fields: [{ Name: "Subscriptionenddatealignment", Value: "2026-05-31" }],
-      ContractEndDate: "2026-12-12T00:00:00",
-    });
-    assert.equal(term.endDate, "2026-12-12");
-    assert.equal(term.endDateSource, "ContractEndDate");
+  it("does not take 'nce' inside a word for NCE, unlike the runbooks' regex", () => {
+    const v = describeSubscription({ ...legacyPrepaid, ServiceDisplayName: "Microsoft 365 E5 Compliance" }, tz, now);
+    assert.equal(v.cspModel, "Legacy");
   });
 
-  it("prefers the price-protection end date", () => {
-    const term = subscriptionTerm({ PriceProtectionEndDate: "2027-01-06T00:00:00", ContractEndDate: "2027-12-01T00:00:00" });
-    assert.equal(term.endDate, "2027-01-06");
+  it("gives non-licences no CSP model and falls back to the contract end date", () => {
+    const v = describeSubscription(
+      {
+        ServiceName: "156469_AzurePlan_88587",
+        ServiceDisplayName: "Azure Plan",
+        Fields: [{ Name: "Subscriptionenddatealignment", Value: "2026-05-31" }],
+        ContractEndDate: "2026-12-12T00:00:00",
+      },
+      tz,
+      now,
+    );
+    assert.equal(v.cspModel, null);
+    assert.equal(v.endDate, "2026-12-12");
+    assert.equal(v.endDateSource, "ContractEndDate");
+  });
+
+  it("prefers the price-protection end date and counts days left in the marketplace's time zone", () => {
+    const sub = { ...legacyMonthly, PriceProtectionEndDate: "2026-11-10T00:00:00", ContractEndDate: "2027-12-01T00:00:00" };
+    // 23:30 UTC on the 9th is already the 10th in Athens, so the end date is today there.
+    const late = new Date("2026-11-09T23:30:00Z");
+    assert.equal(describeSubscription(sub, "Europe/Athens", late).daysLeft, 0);
+    assert.equal(describeSubscription(sub, "UTC", late).daysLeft, 1);
+    assert.equal(describeSubscription(sub, tz, now).endDateSource, "PriceProtectionEndDate");
+  });
+
+  it("puts days left into the runbooks' urgency bands", () => {
+    const at = (end: string) => describeSubscription({ ...legacyMonthly, PriceProtectionEndDate: end }, tz, now).urgency;
+    assert.equal(at("2026-11-08T00:00:00"), "past_end_date");
+    assert.equal(at("2026-12-10T00:00:00"), "urgent"); // 31 days
+    assert.equal(at("2026-12-11T00:00:00"), "soon"); // 32 days
+    assert.equal(at("2027-01-09T00:00:00"), "later"); // 61 days
+    assert.equal(describeSubscription({ AccountId: 2 }, tz, now).urgency, null);
   });
 });
 
@@ -162,6 +217,35 @@ describe("support tools", () => {
     const allowed = await call("execute_report", { reportName: "MSCSPSeats", parameters: {} });
     assert.equal(JSON.parse(allowed.text).data.rowCount, 1);
     assert.deepEqual(asked, ["MSCSPSeats"]);
+  });
+
+  it("get_customer_overview and get_subscription_status give a Legacy monthly subscription the same effective action", async () => {
+    const sub = {
+      AccountId: 42,
+      AccountState: "Active",
+      ServiceName: "156469_LGCMExchangeOnlinePlan1GOV_14349",
+      ServiceDisplayName: "Exchange Online Plan 1 (Government Pricing)",
+      PriceProtectionEndDate: "2027-05-27T00:00:00",
+      Fields: [{ Name: "BillingType", Value: "Monthly" }],
+    };
+    const call = await connect({
+      GetCompany: (b) => [{ AccountId: b.accountId ?? 1, CompanyName: "Acme SA", AccountType: "Company" }],
+      GetSubscriptions: () => [{ AccountId: 42, AccountState: "Active", ServiceName: sub.ServiceName }],
+      GetSubscription: () => sub,
+      GetCreditLimit: () => null,
+      GetUsers: () => [],
+    });
+    const overview = await call("get_customer_overview", { accountId: 7 });
+    assert.equal(overview.isError, false, overview.text);
+    const row = JSON.parse(overview.text).data.subscriptions[0];
+    const status = await call("get_subscription_status", { accountId: 42 });
+    assert.equal(status.isError, false, status.text);
+    const detail = JSON.parse(status.text).data;
+    for (const v of [row, detail]) {
+      assert.equal(v.cspModel, "Legacy");
+      assert.equal(v.effectiveEndDateAction, "Renew");
+      assert.equal(v.endDate, "2027-05-27");
+    }
   });
 
   it("a timeout is reported as a timeout, not as not found", async () => {

@@ -13,7 +13,7 @@ each marketplace separately. It never changes anything in the marketplace.
 | --- | --- |
 | `find_account` | Find a reseller or customer by name, VAT ID or account ID, and see which reseller it belongs to |
 | `get_customer_overview` | Account details, reseller, credit limit, users, and subscriptions with status, errors and end dates |
-| `get_subscription_status` | One subscription: provisioning status and errors, NCE/Legacy, end date, days left, end-date action, scheduled termination, add-ons |
+| `get_subscription_status` | One subscription: provisioning status and errors, NCE/Legacy, end date, days left, urgency, stored and effective end-date action (Legacy monthly always renews), scheduled termination, add-ons |
 | `get_customer_invoices` | Invoice lines for a reseller, or a customer's lines on its reseller's invoices (last month, a given month, or preview) |
 
 **Operational checks** (from the team's automation runbooks):

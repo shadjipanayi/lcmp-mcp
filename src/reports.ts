@@ -115,29 +115,3 @@ export async function mapLimit<T, R>(items: T[], limit: number, fn: (item: T) =>
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;
 }
-
-/**
- * End date of a subscription using the runbooks' precedence: price-protection end, then advance-period end,
- * then the "Subscriptionenddate" product field, then the contract end date (the only date on e.g. Azure Plans).
- * Only GetSubscription returns these dates; the GetSubscriptions list does not.
- */
-export function subscriptionTerm(sub: Rec) {
-  const fields = Array.isArray(sub.Fields) ? (sub.Fields as Rec[]) : [];
-  // Exact name: "Subscriptionenddatealignment" is a different date.
-  const endField = fields.find((f) => /^subscriptionenddate$/i.test(str(f.Name)));
-  const candidates: [string, unknown][] = [
-    ["PriceProtectionEndDate", sub.PriceProtectionEndDate],
-    ["AdvancePeriodEndDate", sub.AdvancePeriodEndDate],
-    ["Subscriptionenddate field", endField?.Value ?? endField?.Date],
-    ["ContractEndDate", sub.ContractEndDate],
-  ];
-  for (const [source, value] of candidates) {
-    const date = parseDate(value);
-    if (date) return { endDate: isoDay(date), daysUntilEnd: daysUntil(date), endDateSource: source };
-  }
-  return { endDate: null, daysUntilEnd: null, endDateSource: null };
-}
-
-/** The runbooks tell NCE (new commerce) from legacy CSP products by "(NCE)" in the product display name. */
-export const isNce = (productDisplayName: unknown) => /\(NCE\)/i.test(str(productDisplayName));
-export const isTrial = (billingType: unknown) => /trial/i.test(str(billingType));
