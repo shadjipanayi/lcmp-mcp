@@ -10,6 +10,7 @@
     "start": "node --env-file-if-exists=.env dist/index.js",
     "inspect": "npx @modelcontextprotocol/inspector node --env-file-if-exists=.env dist/index.js",
     "smoke": "node scripts/smoke-test.mjs",
+    "live": "node --env-file=.env scripts/live-call.mjs",
     "test": "node --import tsx --test test/*.test.ts"
   },
   "license": "ISC",

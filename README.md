@@ -116,3 +116,6 @@ The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP default
   credentials needed). `ping` fails on the mock by design, because the mock can't answer empty responses.
 - `npm test`: offline tests (no API calls) for password redaction, the Entra token check, date handling and the support tools.
 - `npm run inspect`: opens the MCP Inspector UI.
+- `npm run live -- <MARKETPLACE> <tool> [key=value ...]`: calls one tool against the live API configured in `.env`
+  (read-only; build first), e.g. `npm run live -- CYMA get_subscription_status accountId=1234567`.
+- CI runs typecheck, tests and build on every pull request.
