@@ -1,6 +1,6 @@
 {
   "name": "lcmp-mcp",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Read-only MCP server for the LCMP Marketplace SimpleAPI",
   "main": "dist/index.js",
   "scripts": {
