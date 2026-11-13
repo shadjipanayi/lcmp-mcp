@@ -1,0 +1,23 @@
+# Names for the Azure deployment of lcmp-mcp, read by scripts/deploy-azure.sh.
+# Copy to scripts/azure.conf (git-ignored: the repo is public) and fill in.
+# For a new deployment, change ACR and KV: both must be unique across all of Azure
+# (ACR: letters and digits only; KV: 3-24 characters).
+
+SUBSCRIPTION="<subscription name or ID>"
+RG="<resource group>"
+APP=lcmp-mcp
+ENV_NAME=lcmp-mcp-env
+LAW=lcmp-mcp-logs
+IDENTITY=lcmp-mcp-identity
+ACR="<registry name, unique across Azure>"
+KV="<key vault name, unique across Azure>"
+
+API_APP_NAME="LCMP MCP API"
+CLIENT_APP_NAME="LCMP MCP - Copilot Studio"
+
+# Entra group whose direct members get the LCMP.Read role. Empty: the script asks.
+ACCESS_GROUP=""
+
+# Countries to enable, comma-separated (e.g. CYMA,GR,RO). Each needs its API user on that
+# marketplace's AllowList (the Logicom team adds it) and its credentials in .env or typed in.
+MARKETPLACES=CYMA

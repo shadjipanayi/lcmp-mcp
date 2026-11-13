@@ -99,7 +99,7 @@ with a loopback `HOST`.
 Every tool call writes one JSON line to stderr (`event: "tool_call"`, tool, marketplace, signed-in user, duration,
 outcome; no arguments), which Azure collects into Log Analytics.
 
-The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults). Deploy to Azure (Container Apps, Key Vault, Entra ID, Copilot Studio) with `scripts/deploy-azure.sh`, explained in [docs/deploy-azure.md](docs/deploy-azure.md); `scripts/deploy-azure.sh status` checks the live instance, described in [docs/azure-deployment.md](docs/azure-deployment.md).
+The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults). Deploy to Azure (Container Apps, Key Vault, Entra ID, Copilot Studio) with `scripts/deploy-azure.sh`, explained in [docs/deploy-azure.md](docs/deploy-azure.md); `scripts/deploy-azure.sh status` checks the live instance. Its names go in a git-ignored `scripts/azure.conf`, copied from `scripts/azure.conf.example`.
 
 ## Good to know
 

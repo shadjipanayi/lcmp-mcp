@@ -13,8 +13,8 @@ In some environments the **Model Context Protocol** tile under **Tools → Add a
 instead of the setup wizard: the wizard isn't enabled there. Connect the server through a custom connector instead;
 Copilot Studio treats it the same way.
 
-1. Copy [copilot-studio-connector.yaml](copilot-studio-connector.yaml), replacing `HOST` and `TENANT_ID` (values in
-   [azure-deployment.md](azure-deployment.md)).
+1. Copy [copilot-studio-connector.yaml](copilot-studio-connector.yaml), replacing `HOST` (the endpoint
+   `scripts/deploy-azure.sh status` reports) and `TENANT_ID` (`az account show --query tenantId -o tsv`).
 2. In [Power Apps](https://make.powerapps.com), switch to the **same environment as the agent**, then **Custom
    connectors → New custom connector → Import an OpenAPI file**, and pick the file.
 3. On **Security**, choose **OAuth 2.0**, identity provider **Generic OAuth 2**, and fill in the client ID and secret,

@@ -4,7 +4,8 @@ The MCP server runs on **Azure Container Apps**, protected by **Entra ID**, with
 **Key Vault**. Copilot Studio (or any MCP client) calls it at `https://<app>.azurecontainerapps.io/mcp`.
 
 [`scripts/deploy-azure.sh`](../scripts/deploy-azure.sh) does the work, and this page explains its choices. The current
-deployment's names and IDs are in [azure-deployment.md](azure-deployment.md).
+deployment's names and IDs are kept in a git-ignored `docs/azure-deployment.md` on the maintainer's machine (the repo
+is public); `scripts/deploy-azure.sh status` reports any deployment's resources and endpoint.
 
 ## Before you start
 
@@ -17,7 +18,8 @@ deployment's names and IDs are in [azure-deployment.md](azure-deployment.md).
   AllowList**, which the Logicom team manages. Without it, logins from Azure are refused, even though the same user can
   log in from the office. Put each user's credentials in `.env` as `LCMP_<CODE>_USERNAME` and `LCMP_<CODE>_PASSWORD`,
   or type them when the script asks.
-- **[`scripts/azure.conf`](../scripts/azure.conf)** filled in with the subscription, resource group and names. For a new
+- **`scripts/azure.conf`**, copied from [`scripts/azure.conf.example`](../scripts/azure.conf.example) and filled in with
+  the subscription, resource group and names. It is git-ignored, because the repo is public. For a new
   deployment, pick new `ACR` and `KV` names, because both must be unique across Azure.
 
 ## Run it

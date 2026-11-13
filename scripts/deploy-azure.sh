@@ -235,7 +235,7 @@ report() {
 
 load_conf() {
   [[ -f package.json && -f Dockerfile ]] || die "Run this from the repo root."
-  [[ -f "$CONF" ]] || die "Config $CONF not found."
+  [[ -f "$CONF" ]] || die "Config $CONF not found: copy scripts/azure.conf.example to scripts/azure.conf and fill it in."
   # shellcheck source=azure.conf
   source "$CONF"
   local v; for v in SUBSCRIPTION RG APP ENV_NAME LAW IDENTITY ACR KV API_APP_NAME CLIENT_APP_NAME MARKETPLACES; do
