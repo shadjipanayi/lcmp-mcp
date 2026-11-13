@@ -1,5 +1,5 @@
-import type { LcmpPort } from "./client.js";
-import { isBlockedReport } from "./knowledge.js";
+import type { LcmpPort, Workload } from "./client.js";
+import { isBlockedReport, reportTtlMs } from "./knowledge.js";
 
 export type Rec = Record<string, unknown>;
 
@@ -58,6 +58,89 @@ export async function runReport(
   const records = reportToRecords(await executeReport(client, reportName, parameters));
   if (!records) throw new Error(`Report "${reportName}" did not return a Columns/Rows table.`);
   return records;
+}
+
+/** JSON with object keys sorted at every level, so {a, b} and {b, a} give the same cache key. */
+function stableKey(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableKey).join(",")}]`;
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Rec).filter(([, v]) => v !== undefined).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableKey(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+interface CachedReport {
+  /** When the request that produced the data was sent. */
+  at: number;
+  ttl: number;
+  data: unknown;
+}
+
+/** The API port a tool call gets: report calls are answered from the cache, every other call goes to the API. */
+export interface ReportScope {
+  port: LcmpPort;
+  /** When the oldest report this call used was fetched, or when the scope was opened if it used none. */
+  readonly dataAsOf: number;
+  /** True when the call ran reports and sent no new request for any of them (a shared in-flight load counts as saved). */
+  readonly allFromCache: boolean;
+}
+
+/**
+ * A marketplace's remembered report results. Reports take seconds to minutes, so a result is kept for its report's TTL
+ * (`reportTtlMs`) and reused by any caller asking for the same report, parameters and columns. Concurrent requests
+ * share one API request; failures are not kept. Blocked reports never get here: executeReport refuses them first.
+ */
+export class ReportCache {
+  private readonly cache = new Map<string, CachedReport>();
+  private readonly loads = new Map<string, Promise<CachedReport>>();
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  /** A port for one tool call. With `refresh`, its reports are fetched again (unless already loading) and replace what's kept. */
+  scope(client: LcmpPort, refresh = false): ReportScope {
+    const opened = this.now();
+    let oldest: number | undefined;
+    let used = 0;
+    let fetched = 0;
+    const port: LcmpPort = {
+      call: async (operation, body = {}, workload) => {
+        if (operation !== "ExecuteReport") return client.call(operation, body, workload);
+        const { report, sent } = await this.get(client, body, workload, refresh);
+        used++;
+        if (sent) fetched++;
+        if (oldest === undefined || report.at < oldest) oldest = report.at;
+        return report.data;
+      },
+    };
+    return {
+      port,
+      get dataAsOf() {
+        return oldest ?? opened;
+      },
+      get allFromCache() {
+        return used > 0 && fetched === 0;
+      },
+    };
+  }
+
+  private async get(client: LcmpPort, body: Rec, workload: Workload | undefined, refresh: boolean) {
+    const key = stableKey(body);
+    const hit = this.cache.get(key);
+    if (!refresh && hit && this.now() - hit.at < hit.ttl) return { report: hit, sent: false };
+    const loading = this.loads.get(key);
+    if (loading) return { report: await loading, sent: false };
+    const load = (async () => {
+      const at = this.now();
+      const data = await client.call("ExecuteReport", body, workload);
+      const report = { at, ttl: reportTtlMs(String(body.reportName ?? "")), data };
+      for (const [k, v] of this.cache) if (this.now() - v.at >= v.ttl) this.cache.delete(k);
+      this.cache.set(key, report);
+      return report;
+    })().finally(() => this.loads.delete(key));
+    this.loads.set(key, load);
+    return { report: await load, sent: true };
+  }
 }
 
 /**

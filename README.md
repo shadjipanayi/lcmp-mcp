@@ -48,7 +48,7 @@ Configuration is through environment variables (template in `.env.example`):
 | `LCMP_BASE_URL` | `https://marketplace.logicom.net/SimpleAPI/SimpleAPIService.svc/rest` |
 | `LCMP_MARKETPLACES` | Codes to enable: `CYMA, GR, ENET, RO, IT, SA, JO, LB, AE, QA, KW, OM, BH, MA` |
 | `LCMP_<CODE>_USERNAME` / `LCMP_<CODE>_PASSWORD` | The read-only API user for that marketplace (no MFA) |
-| `LCMP_TIMEOUT_MS` | Optional default timeout, 30000. Reports always use 300 s |
+| `LCMP_TIMEOUT_MS` | Optional default timeout, 60000. Reports always use 300 s |
 | `LCMP_MAX_CONCURRENCY` | Optional, quick API requests in flight per marketplace user, default 3. Reports and big lists use a separate queue of 2, and per-item fan-outs (e.g. one call per subscription) another queue of 2, so neither holds up quick lookups. Extra calls wait |
 
 With only `LCMP_USERNAME` / `LCMP_PASSWORD` (and no `LCMP_MARKETPLACES`), the server runs for one marketplace.
@@ -99,7 +99,7 @@ with a loopback `HOST`.
 Every tool call writes one JSON line to stderr (`event: "tool_call"`, tool, marketplace, signed-in user, duration,
 outcome; no arguments), which Azure collects into Log Analytics.
 
-The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults). Step-by-step Azure deployment (Container Apps, Key Vault, Entra ID, Copilot Studio): [docs/deploy-azure.md](docs/deploy-azure.md).
+The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP defaults). Deploy to Azure (Container Apps, Key Vault, Entra ID, Copilot Studio) with `scripts/deploy-azure.sh`, explained in [docs/deploy-azure.md](docs/deploy-azure.md); `scripts/deploy-azure.sh status` checks the live instance. Its names go in a git-ignored `scripts/azure.conf`, copied from `scripts/azure.conf.example`.
 
 ## Good to know
 
@@ -108,6 +108,10 @@ The `Dockerfile` builds the hosted image (`node dist/index.js` with HTTP default
   because each marketplace's MCP user is shared by the whole team.
 - Searching customers by name lists every reseller's customers the first time for each marketplace (a minute or two);
   the list is then cached for 6 hours.
+- Report results (`execute_report` and the `review_*` tools, except the consumption forecast) are kept in memory per marketplace and reused by anyone
+  asking for the same report and parameters: 6 hours for last month's billing reports, 5 minutes for provisioning
+  and credit data, 15 minutes for the rest. Results say when their data was fetched (`dataAsOf`), and
+  `refresh: true` fetches again. A restart empties the cache.
 - Avoid heavy reports during the platform's billing run (00:00-02:50 UTC) and Azure sync (05:30-06:30 UTC). They time out.
 
 ## Testing

@@ -3,3 +3,8 @@ dist/
 .env
 .cursor/
 .vscode/
+
+# Deployment identifiers and real test data: the repo is public. Templates are committed beside them.
+scripts/azure.conf
+docs/azure-deployment.md
+*.local.csv

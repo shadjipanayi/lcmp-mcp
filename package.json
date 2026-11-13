@@ -11,7 +11,8 @@
     "inspect": "npx @modelcontextprotocol/inspector node --env-file-if-exists=.env dist/index.js",
     "smoke": "node scripts/smoke-test.mjs",
     "live": "node --env-file=.env scripts/live-call.mjs",
-    "test": "node --import tsx --test test/*.test.ts"
+    "test": "node --import tsx --test test/*.test.ts",
+    "check:ids": "node scripts/check-identifiers.mjs"
   },
   "license": "ISC",
   "dependencies": {

@@ -31,5 +31,20 @@ export const REPORT_CATALOGUE = `Reports used in production (names are exact): "
  */
 export const BLOCKED_REPORTS = ["Failed provisioning statistics"];
 
+/**
+ * How long a report's result is reused (ms). Reports on a closed period (last month's billing, billable product
+ * fields) change little in a day; provisioning and credit data change by the minute. Others get the default.
+ */
+const DEFAULT_REPORT_TTL_MS = 15 * 60 * 1000;
+const REPORT_TTL_MS: Record<string, number> = {
+  "mscsp resellers": 6 * 60 * 60 * 1000,
+  "all products with billable fields": 6 * 60 * 60 * 1000,
+  "waiting provisioning requests": 5 * 60 * 1000,
+  "failed provisioning details": 5 * 60 * 1000,
+  "credit limits": 5 * 60 * 1000,
+};
+
+export const reportTtlMs = (name: string) => REPORT_TTL_MS[name.trim().toLowerCase()] ?? DEFAULT_REPORT_TTL_MS;
+
 export const isBlockedReport = (name: string) =>
   BLOCKED_REPORTS.some((blocked) => blocked.toLowerCase() === name.trim().toLowerCase());

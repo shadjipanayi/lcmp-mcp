@@ -72,6 +72,7 @@ function fieldMap(fields: unknown): Rec {
 export function registerRunbookTools(server: McpServer, registry: MarketplaceRegistry): void {
   registerCompositeTool(server, registry, {
     name: "review_provisioning_requests",
+    cachesReports: true,
     title: "Review waiting and failed provisioning",
     description:
       "Daily ops check (runbook AllMarketplacesWaitingAndFailedProvisionings). Runs the 'Waiting provisioning requests' and " +
@@ -154,6 +155,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
 
   registerCompositeTool(server, registry, {
     name: "review_credit_health",
+    cachesReports: true,
     title: "Review reseller credit limits and credit orders",
     description:
       "Credit-control check (runbooks AllResellersCreditLimits, CountriesResellersCreditLimitNotSet, " +
@@ -242,6 +244,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
 
   registerCompositeTool(server, registry, {
     name: "review_upcoming_renewals",
+    cachesReports: true,
     title: "Review upcoming Microsoft CSP renewals",
     description:
       "Renewal check (runbook AllMarketplacesCSPSubscriptionsEndDateAction). Combines the 'Price Protected Services', " +
@@ -357,6 +360,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
 
   registerCompositeTool(server, registry, {
     name: "review_nce_trials",
+    cachesReports: true,
     title: "Review NCE trial subscriptions",
     description:
       "Trial check (runbook AllMarketplacesNCETrialsSetToBeTerminated). Finds NCE trial subscriptions in the 'MSCSPSeats' " +
@@ -405,6 +409,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
 
   registerCompositeTool(server, registry, {
     name: "review_seat_changes",
+    cachesReports: true,
     title: "Review Microsoft CSP seat changes",
     description:
       "Seat movement check (runbooks *SeatChangesDaily, DailyManagementReport). Runs the 'MSCSPSeatDelta' report for a date " +
@@ -545,6 +550,7 @@ export function registerRunbookTools(server: McpServer, registry: MarketplaceReg
 
   registerCompositeTool(server, registry, {
     name: "review_inactive_resellers",
+    cachesReports: true,
     title: "Review inactive resellers",
     description:
       "Reseller activity check (runbook AllMarketplacesInactiveResellers). Uses the 'MSCSP Resellers' report (last month's " +
