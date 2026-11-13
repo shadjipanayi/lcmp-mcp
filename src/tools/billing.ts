@@ -69,6 +69,7 @@ export function registerBillingTools(server: McpServer, registry: MarketplaceReg
   // before anything reaches the API.
   registerCompositeTool(server, registry, {
     name: "execute_report",
+    cachesReports: true,
     title: "Run a report",
     description:
       "Run a report and return its rows as {column: value} records. Call get_reports to confirm a report's parameters " +

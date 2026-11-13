@@ -30,7 +30,7 @@ Callers state a `Workload`, never a timeout. The client owns the timeouts and FI
 
 | Workload | For | In flight | Timeout |
 | --- | --- | --- | --- |
-| `quick` (default) | single lookups | `LCMP_MAX_CONCURRENCY` (3) | `LCMP_TIMEOUT_MS` (30 s) |
+| `quick` (default) | single lookups | `LCMP_MAX_CONCURRENCY` (3) | `LCMP_TIMEOUT_MS` (60 s) |
 | `bulk` | per-item fan-outs in reviews and the name-search directory | 2, shared by all tools | 30 s |
 | `heavy` | reports and big lists | 2 | 300 s |
 
@@ -40,22 +40,22 @@ Start a bulk fan-out's calls together; the lane queues them. A fan-out someone i
 
 ## Marketplaces (`src/marketplaces.ts`)
 
-One `Marketplace` per country (same base URL, a dedicated API user each) in a `MarketplaceRegistry`, built by `createMarketplace`. Each owns its client, an `Accounts` and an `Invoices` module, so caches belong to the marketplace instance. Every call targets exactly one marketplace: tools get an injected `marketplace` input (required unless only one is configured), and `runInMarketplace` resolves it, runs the call and labels the result. A lookup that returns `undefined` or throws `NotFoundError` becomes a "not found in this marketplace" error. Each marketplace has a local time zone (`KNOWN_MARKETPLACES`), used for "today".
+One `Marketplace` per country (same base URL, a dedicated API user each) in a `MarketplaceRegistry`, built by `createMarketplace`. Each owns its client, an `Accounts` and an `Invoices` module and a `ReportCache`, so caches belong to the marketplace instance (`createMarketplace` takes an optional `now` clock for tests). Every call targets exactly one marketplace: tools get an injected `marketplace` input (required unless only one is configured), and `runInMarketplace` resolves it, runs the call and labels the result. A lookup that returns `undefined` or throws `NotFoundError` becomes a "not found in this marketplace" error. Each marketplace has a local time zone (`KNOWN_MARKETPLACES`), used for "today".
 
 ## Domain modules
 
 - **`src/accounts.ts` (`Accounts`)**: hierarchy root → resellers (`GetCompanies(root)`) → customers (`GetCompanies(reseller)`). Lookup by ID (GetCompany, then GetReseller on "not here"), by VAT ID (several matches is an error listing them), name search over a 6 h directory (concurrent builds shared), `role` (root told apart by its ID) and `resellerOf`.
 - **`src/invoices.ts` (`Invoices`)**: marketplace-wide invoice downloads (minutes each), cached 6 h for closed months and 15 min for the preview. Invoices go to resellers; a customer's lines are matched by subscription `AccountId` or `EndCustomerName`.
 - **`src/subscription.ts`**: every subscription rule. `describeSubscription(record, timeZone)` returns one view (CSP model, Legacy monthly, end date and source, days left, urgency, stored and effective end-date action); `fetchSubscription(s)` fetches. Tools never re-derive these.
-- **`src/reports.ts`**: `executeReport` is the only path to `ExecuteReport` and refuses `BLOCKED_REPORTS` (`src/knowledge.ts`); `runReport` + `reportToRecords` turn the `Columns[{Name,CellIndex}]` / `Rows[{Cells}]` table into records and drop `ZZ_Total` summary rows; `pick` looks up columns case-insensitively. `settle({label: promise})` runs a tool's independent parts and keeps what worked plus `"<label>: <error>"` entries.
+- **`src/reports.ts`**: `executeReport` is the only path to `ExecuteReport` and refuses `BLOCKED_REPORTS` (`src/knowledge.ts`); `runReport` + `reportToRecords` turn the `Columns[{Name,CellIndex}]` / `Rows[{Cells}]` table into records and drop `ZZ_Total` summary rows; `pick` looks up columns case-insensitively. `settle({label: promise})` runs a tool's independent parts and keeps what worked plus `"<label>: <error>"` entries. `ReportCache` remembers `ExecuteReport` results per marketplace, keyed by report name, parameters (key order ignored) and columns, for `reportTtlMs(name)` (`src/knowledge.ts`: 6 h for last month's billing and billable product fields, 5 min for provisioning and credit limits, 15 min otherwise); concurrent requests share one load and failures aren't kept. Its `scope(client, refresh)` gives one tool call a port that answers report calls from the cache and passes every other call through, and tracks the oldest fetch time and whether anything was fetched.
 - **`src/seats.ts`**: `readSeats`, the typed reader for "MSCSPSeats", the report several reviews share. A report that more tools start sharing gets a reader like it.
-- **`src/knowledge.ts`**: report names and technical product codes used in production, embedded in tool descriptions, and `BLOCKED_REPORTS` (reports that overload the platform).
+- **`src/knowledge.ts`**: report names and technical product codes used in production, embedded in tool descriptions, `BLOCKED_REPORTS` (reports that overload the platform) and `reportTtlMs` (how long the report cache keeps each report's result).
 
 ## Tools (`src/tools/`)
 
 - **Raw read tools** are declared as data (`ReadToolSpec`: `name`, `operation`, `title`, `description`, zod `input`, optional `transform` and `workload`), grouped by domain, and registered with `registerReadTools`. Zod input keys are sent verbatim as the request body, so they must match the API's field names; undefined optional args are stripped. Shared field schemas (`accountId`, `resellerContext`, `serviceFilters`, ...) live in `helpers.ts`. List tools return compact rows through a `transform` (a country's full reseller records are ~200k characters); give new list tools the same treatment.
 - **Support tools** (`support.ts`): `find_account`, `get_customer_overview`, `get_subscription_status`, `get_customer_invoices`, built on the domain modules above.
 - **Review tools** (`runbooks.ts`, `review_*`) port the business rules of the PowerShell runbooks in `C:\Users\s.hadjipanayi\Documents\LogicomCloudBU\CloudBUAA-New\runbooks` (read-only reference: thresholds, NCE vs Legacy, end-date precedence). Each names its source runbook in its description; when a runbook's logic changes, update the matching tool. A runbook's write step is reported as `suggestedAction`.
-- Composite tools are registered with `registerCompositeTool` (`run(args, client, marketplace)`).
+- Composite tools are registered with `registerCompositeTool` (`run(args, client, marketplace)`). Tools that run reports (`execute_report` and every `review_*` except `review_consumption_forecast`, which uses `GetAllProductAccountsWithFieldsReport`, not `ExecuteReport`) set `cachesReports`: their `client` is the report cache's scope, they get a `refresh` input, their result gains `dataAsOf` (oldest report used, or the call time if none), and the usage line gains `fromCache`. Give a new report-running tool the same flag.
 
 `formatResult` redacts secrets, serialises compact JSON and truncates at `MAX_RESPONSE_CHARS` (100k). Tool errors are returned as `isError` content. `handle()` in `helpers.ts` wraps every call and writes one JSON `tool_call` line to stderr (tool, marketplace, Entra user, duration, outcome; never arguments).

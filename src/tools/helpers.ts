@@ -25,6 +25,11 @@ export interface CompositeToolSpec<Shape extends z.ZodRawShape> {
   title: string;
   description: string;
   input?: Shape;
+  /**
+   * The tool runs reports: their results are reused from the marketplace's report cache, the tool gets a `refresh`
+   * input to fetch them again, and its result says when its data was fetched (`dataAsOf`).
+   */
+  cachesReports?: boolean;
   /** Chains read calls against one marketplace and returns the data to show the model (undefined = not found). */
   run: (args: z.infer<z.ZodObject<Shape>>, client: LcmpPort, marketplace: Marketplace) => Promise<unknown>;
 }
@@ -38,6 +43,13 @@ function marketplaceInput(registry: MarketplaceRegistry) {
 }
 
 // Reusable field definitions.
+const refreshInput = z
+  .boolean()
+  .optional()
+  .describe(
+    "Fetch the reports again instead of reusing a recent result (results are kept for 5 min to 6 h, depending on the " +
+      "report; dataAsOf says when the data was fetched). Use only when the user asks for current data.",
+  );
 export const accountId = (what = "account") => z.number().int().describe(`The ${what} Account ID.`);
 export const resellerContext = z
   .number()
@@ -103,14 +115,16 @@ async function handle(
   registry: MarketplaceRegistry,
   args: Record<string, unknown> | undefined,
   ctx: CallContext | undefined,
-  fn: (m: Marketplace, rest: Record<string, unknown>) => Promise<unknown>,
+  fn: (m: Marketplace, rest: Record<string, unknown>, log: Record<string, unknown>) => Promise<unknown>,
 ) {
   const started = Date.now();
   const { marketplace, ...rest } = args ?? {};
   const user = ctx?.authInfo?.extra?.user ?? ctx?.authInfo?.clientId;
   let error: string | undefined;
+  /** Extra fields a tool adds to its usage line. */
+  const log: Record<string, unknown> = {};
   try {
-    const data = await runInMarketplace(registry, marketplace as string | undefined, (m) => fn(m, rest));
+    const data = await runInMarketplace(registry, marketplace as string | undefined, (m) => fn(m, rest, log));
     return { content: [{ type: "text" as const, text: formatResult(data) }] };
   } catch (err) {
     error = err instanceof Error ? err.message : String(err);
@@ -124,6 +138,7 @@ async function handle(
         user: user ?? null,
         ms: Date.now() - started,
         ok: error === undefined,
+        ...log,
         ...(error ? { error: error.slice(0, 300) } : {}),
       }),
     );
@@ -159,12 +174,25 @@ export function registerCompositeTool<Shape extends z.ZodRawShape>(
     {
       title: spec.title,
       description: spec.description,
-      inputSchema: { ...spec.input, marketplace: marketplaceInput(registry) },
+      inputSchema: { ...spec.input, ...(spec.cachesReports ? { refresh: refreshInput } : {}), marketplace: marketplaceInput(registry) },
       annotations: { title: spec.title, readOnlyHint: true, openWorldHint: true },
     },
     // The SDK has already validated args against the input schema.
     (args: Record<string, unknown>, ctx: CallContext) =>
-      handle(spec.name, registry, args, ctx, (m, rest) => spec.run(rest as z.infer<z.ZodObject<Shape>>, m.client, m)),
+      handle(spec.name, registry, args, ctx, async (m, rest, log) => {
+        if (!spec.cachesReports) return spec.run(rest as z.infer<z.ZodObject<Shape>>, m.client, m);
+        const { refresh, ...toolArgs } = rest;
+        const scope = m.reports.scope(m.client, refresh === true);
+        let data: unknown;
+        try {
+          data = await spec.run(toolArgs as z.infer<z.ZodObject<Shape>>, scope.port, m);
+        } finally {
+          log.fromCache = scope.allFromCache;
+        }
+        if (data === undefined) return data;
+        const dataAsOf = new Date(scope.dataAsOf).toISOString();
+        return data && typeof data === "object" && !Array.isArray(data) ? { ...data, dataAsOf } : { dataAsOf, result: data };
+      }),
   );
 }
 
