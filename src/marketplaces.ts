@@ -2,6 +2,7 @@ import { Accounts } from "./accounts.js";
 import { LcmpClient, type LcmpPort } from "./client.js";
 import { NotFoundError } from "./errors.js";
 import { Invoices } from "./invoices.js";
+import { ReportCache } from "./reports.js";
 
 /**
  * Country marketplaces: display name and local time zone (for "today" in date-based reports).
@@ -32,11 +33,13 @@ export interface Marketplace {
   client: LcmpPort;
   accounts: Accounts;
   invoices: Invoices;
+  reports: ReportCache;
 }
 
 /** Builds a marketplace around an API connection; a fresh marketplace has fresh caches. */
-export function createMarketplace(m: { code: string; name: string; timeZone: string; client: LcmpPort }): Marketplace {
-  return { ...m, accounts: new Accounts(m.client), invoices: new Invoices(m.client) };
+export function createMarketplace(m: { code: string; name: string; timeZone: string; client: LcmpPort; now?: () => number }): Marketplace {
+  const { now, ...rest } = m;
+  return { ...rest, accounts: new Accounts(m.client, now), invoices: new Invoices(m.client, now), reports: new ReportCache(now) };
 }
 
 /**
@@ -50,8 +53,8 @@ export function createMarketplace(m: { code: string; name: string; timeZone: str
 export function loadMarketplaces(env: NodeJS.ProcessEnv = process.env): Marketplace[] {
   const baseUrl = env.LCMP_BASE_URL?.trim().replace(/\/+$/, "");
   if (!baseUrl) throw new Error("Missing required environment variable LCMP_BASE_URL (see .env.example).");
-  const timeout = Number(env.LCMP_TIMEOUT_MS ?? 30_000);
-  const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 30_000;
+  const timeout = Number(env.LCMP_TIMEOUT_MS ?? 60_000);
+  const timeoutMs = Number.isFinite(timeout) && timeout > 0 ? timeout : 60_000;
   const maxConcurrency = Number(env.LCMP_MAX_CONCURRENCY ?? 3) || 3;
 
   const make = (code: string, username: string | undefined, password: string | undefined): Marketplace =>

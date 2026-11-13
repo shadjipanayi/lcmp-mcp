@@ -1,0 +1,30 @@
+# Power Platform custom connector for the hosted MCP server, for environments where Copilot Studio's
+# MCP wizard isn't available. Replace HOST and TENANT_ID, then import it (see copilot-studio-agent.md).
+swagger: '2.0'
+info:
+  title: LCMP Marketplace
+  description: Read-only Logicom Cloud Marketplace lookups for internal support staff.
+  version: 1.0.0
+host: HOST.azurecontainerapps.io
+basePath: /
+schemes:
+  - https
+paths:
+  /mcp:
+    post:
+      summary: LCMP Marketplace MCP server
+      description: Read-only Logicom Cloud Marketplace lookups for internal support staff.
+      x-ms-agentic-protocol: mcp-streamable-1.0
+      operationId: InvokeMCP
+      responses:
+        '200':
+          description: Success
+securityDefinitions:
+  oauth2_auth:
+    type: oauth2
+    flow: accessCode
+    authorizationUrl: https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/authorize
+    tokenUrl: https://login.microsoftonline.com/TENANT_ID/oauth2/v2.0/token
+    scopes: {}
+security:
+  - oauth2_auth: []
