@@ -13,17 +13,58 @@ In some environments the **Model Context Protocol** tile under **Tools → Add a
 instead of the setup wizard: the wizard isn't enabled there. Connect the server through a custom connector instead;
 Copilot Studio treats it the same way.
 
-1. Copy [copilot-studio-connector.yaml](copilot-studio-connector.yaml), replacing `HOST` (the endpoint
-   `scripts/deploy-azure.sh status` reports) and `TENANT_ID` (`az account show --query tenantId -o tsv`).
-2. In [Power Apps](https://make.powerapps.com), switch to the **same environment as the agent**, then **Custom
-   connectors → New custom connector → Import an OpenAPI file**, and pick the file.
-3. On **Security**, choose **OAuth 2.0**, identity provider **Generic OAuth 2**, and fill in the client ID and secret,
-   authorization, token and refresh URLs, and scope from stage 11 of the deploy script (same values as the wizard).
-4. **Create connector**. The Security tab then shows a **Redirect URL**: add it to the "LCMP MCP - Copilot Studio" app
-   registration (Entra admin centre → App registrations → Authentication → Web redirect URIs).
+Create the connector **inside a solution**. A connector created outside one (Power Apps → Custom connectors) is
+converted when it's added to the agent, and the conversion leaves it unreadable: every call, even the owner's, then
+fails with "does not have permission to custom connector", and it can't be edited or deleted. Existing connections keep
+working for a while, so it looks like it broke later.
+
+1. Copy [copilot-studio-connector.yaml](copilot-studio-connector.yaml) outside the repo, replacing `HOST` (the endpoint
+   `scripts/deploy-azure.sh status` reports, without `https://`) and `TENANT_ID` (`az account show --query tenantId -o
+   tsv`). The pre-commit hook rejects the filled copy if it lands in the repo.
+2. In [Power Apps](https://make.powerapps.com), switch to the **same environment as the agent**, then **Solutions →**
+   the agent's solution (for an agent in the default environment, **Common Data Services Default Solution**) **→ New →
+   Automation → Custom connector → Import an OpenAPI file**, and pick the file.
+3. On **Security**, choose **OAuth 2.0** and identity provider **Azure Active Directory** (the import defaults to Generic
+   OAuth 2, which asks for a refresh URL). Values, from stage 11 of the deploy script:
+   - Client ID and secret: the "LCMP MCP - Copilot Studio" app registration and its secret.
+   - Authorization URL `https://login.microsoftonline.com`, tenant ID `common`, on-behalf-of login off.
+   - Resource URL: the API app's ID URI, `api://<API app ID>`.
+   - Scope: `api://<API app ID>/access_as_user offline_access`.
+4. **Create connector**, then read the **Redirect URL** on the Security tab. It is derived from the connector's name and
+   solution prefix (e.g. `…/redirect/<prefix>-5f<name>-<suffix>`), so it changes every time the connector is recreated
+   or renamed. Add it to the "LCMP MCP - Copilot Studio" app registration (Entra admin centre → App registrations →
+   Authentication → Web redirect URIs) **before** creating a connection, or sign-in fails with AADSTS50011. Editing
+   the app needs its owner or the Cloud Application Administrator role; keep the maintainer listed as owner of both app
+   registrations so this doesn't need an admin ticket.
 5. On **Test**, create a connection and sign in, to check that the sign-in works.
-6. In Copilot Studio: **Tools → Add a tool**, filter on **Model Context Protocol**, pick **LCMP Marketplace**, create
+6. In Copilot Studio: **Tools → Add a tool**, filter on **Model Context Protocol**, pick the connector, create
    the connection and **Add to agent**. Then set End user credentials as below.
+
+### Diagnose the connector
+
+The connector has two records: one in the connector service and one in Dataverse. A healthy solution connector's
+connector-service record names its Dataverse record in `xrmConnectorId`; an empty value on a connector that has a
+Dataverse record is the broken conversion above. These read-only queries use the maintainer's `az` sign-in; run them in
+PowerShell (from the Bash sandbox, Dataverse calls get no connection). `$E` is the environment name (`Default-<tenant
+ID>` for the default environment).
+
+```powershell
+$T = az account get-access-token --resource https://service.powerapps.com/ --query accessToken -o tsv
+$api = 'https://api.powerapps.com/providers/Microsoft.PowerApps'
+# Connector-service records: name, display name, Dataverse link, redirect URL
+(Invoke-RestMethod -Headers @{Authorization="Bearer $T"} -Uri "$api/apis?api-version=2016-11-01&`$filter=environment eq '$E' and IsCustomApi eq 'True'").value |
+  ForEach-Object { "$($_.name) | $($_.properties.displayName) | xrm=$($_.properties.xrmConnectorId) | $($_.properties.connectionParameters.token.oAuthSettings.redirectUrl)" }
+# Connections and their status
+(Invoke-RestMethod -Headers @{Authorization="Bearer $T"} -Uri "$api/connections?api-version=2016-11-01&`$filter=environment eq '$E'").value |
+  ForEach-Object { "$($_.name) | $($_.properties.apiId -replace '.*/','') | $($_.properties.statuses[0].status)" }
+# Dataverse records (instance URL: properties.linkedEnvironmentMetadata.instanceUrl of the environment)
+$U = (Invoke-RestMethod -Headers @{Authorization="Bearer $T"} -Uri "https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/environments/$E`?api-version=2020-10-01").properties.linkedEnvironmentMetadata.instanceUrl.TrimEnd('/')
+$D = az account get-access-token --resource $U --query accessToken -o tsv
+(Invoke-RestMethod -Headers @{Authorization="Bearer $D"} -Uri "$U/api/data/v9.2/connectors?`$select=name,connectorinternalid,connectorid,createdon").value
+```
+
+A broken connector can be removed by deleting its Dataverse record (`DELETE $U/api/data/v9.2/connectors(<connectorid>)`,
+as its owner); that removes the connector-service record too.
 
 ## Name and description
 

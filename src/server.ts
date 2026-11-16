@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { MarketplaceRegistry } from "./marketplaces.js";
 import { registerAccountTools } from "./tools/accounts.js";
@@ -8,7 +9,8 @@ import { registerRunbookTools } from "./tools/runbooks.js";
 import { registerSubscriptionTools } from "./tools/subscriptions.js";
 import { registerSupportTools } from "./tools/support.js";
 
-export const SERVER_VERSION = "0.3.0";
+/** package.json's version (one level up from both src/ and dist/), so /health always names the deployed image's version. */
+export const SERVER_VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
 
 /**
  * Builds an MCP server with every tool. Cheap to call: state worth keeping (API sessions, the customer directory

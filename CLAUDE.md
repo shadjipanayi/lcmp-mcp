@@ -26,7 +26,9 @@ Also: every call targets exactly one marketplace (never fan out across countries
 - `npm run live -- <MARKETPLACE> <tool> [key=value ...]`: one tool against the live API in `.env` (build first), e.g. `npm run live -- CYMA get_subscription_status accountId=277615`. The project `.mcp.json` also exposes the local build as the `lcmp-dev` MCP server.
 - `npm run dev` (from source), `npm run inspect` (MCP Inspector)
 
-CI (`.github/workflows/ci.yml`) runs typecheck, tests and build on every PR. There is no linter.
+CI: `.github/workflows/ci.yml`. There is no linter. The pre-commit hook (`.githooks/`, enabled by `npm install`) runs `npm run check:ids`: the repo is public, so deployment IDs and hosts stay in git-ignored files.
+
+Copilot Studio agent, connector or evaluation work: read [docs/copilot-studio-agent.md](docs/copilot-studio-agent.md).
 
 Config is via env vars (see `.env.example`): `LCMP_BASE_URL`, `LCMP_MARKETPLACES` and `LCMP_<CODE>_USERNAME`/`_PASSWORD` per marketplace (API users without MFA). `dev`, `start`, `inspect` and `live` load a git-ignored `.env`. Against the live API, avoid heavy reports during the billing run (00:00-02:50 UTC) and Azure sync (05:30-06:30 UTC): they time out.
 

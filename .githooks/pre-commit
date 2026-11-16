@@ -1,0 +1,4 @@
+#!/bin/sh
+# Blocks a commit that would publish a deployment identifier (the repo is public). Enabled by `npm install`
+# (the prepare script sets core.hooksPath to .githooks).
+exec npm run -s check:ids

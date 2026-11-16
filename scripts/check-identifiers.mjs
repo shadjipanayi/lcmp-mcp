@@ -1,5 +1,6 @@
-// Fails if a tracked file contains a GUID, e.g. a subscription, tenant or app ID. The repo is public:
-// deployment identifiers belong in .env or a git-ignored parameter file, and docs use placeholders.
+// Fails if a tracked file contains a deployment identifier: a GUID (subscription, tenant or app ID) or an Azure or
+// Power Platform host name. The repo is public: deployment identifiers belong in .env or a git-ignored parameter
+// file, and docs use placeholders. Runs in CI and as the pre-commit hook (.githooks/pre-commit).
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 
@@ -9,7 +10,12 @@ const ALLOWED = new Set([
 ]);
 // Vendored or synthetic content: the API spec's examples, lockfiles, test fixtures, vendored skills.
 const SKIPPED = [/^package-lock\.json$/, /^openapi\.json$/, /^test\//, /^\.claude\/skills\//];
-const GUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi;
+const PATTERNS = [
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi,
+  // A concrete (lower-case) host. Placeholders (HOST.azurecontainerapps.io, <app>.<env>.azurecontainerapps.io) and
+  // shell variables ($ACR.azurecr.io) don't match.
+  /(?<![$\w.{}-])[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:azurecontainerapps\.io|azurecr\.io|vault\.azure\.net|dynamics\.com|onmicrosoft\.com)\b/g,
+];
 
 const files = execFileSync("git", ["ls-files"], { encoding: "utf8" })
   .split("\n")
@@ -20,14 +26,16 @@ for (const file of files) {
   readFileSync(file, "utf8")
     .split("\n")
     .forEach((line, i) => {
-      for (const [guid] of line.matchAll(GUID)) {
-        if (!ALLOWED.has(guid.toLowerCase())) hits.push(`${file}:${i + 1}: ${guid}`);
+      for (const re of PATTERNS) {
+        for (const [id] of line.matchAll(re)) {
+          if (!ALLOWED.has(id.toLowerCase())) hits.push(`${file}:${i + 1}: ${id}`);
+        }
       }
     });
 }
 
 if (hits.length) {
-  console.error("GUIDs found in tracked files. Replace them with placeholders, or allowlist a public ID in scripts/check-identifiers.mjs:");
+  console.error("Deployment identifiers found in tracked files. Replace them with placeholders, or allowlist a public ID in scripts/check-identifiers.mjs:");
   for (const h of hits) console.error(`  ${h}`);
   process.exit(1);
 }
