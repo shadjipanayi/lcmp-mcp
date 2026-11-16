@@ -12,7 +12,8 @@
     "smoke": "node scripts/smoke-test.mjs",
     "live": "node --env-file=.env scripts/live-call.mjs",
     "test": "node --import tsx --test test/*.test.ts",
-    "check:ids": "node scripts/check-identifiers.mjs"
+    "check:ids": "node scripts/check-identifiers.mjs",
+    "prepare": "git config core.hooksPath .githooks || true"
   },
   "license": "ISC",
   "dependencies": {
